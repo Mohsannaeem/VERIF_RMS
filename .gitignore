@@ -12,6 +12,12 @@ dist
 dist-ssr
 *.local
 
+# Screenshot tooling (keep only the output images)
+docs/node_modules/
+docs/package.json
+docs/package-lock.json
+docs/screenshot.mjs
+
 # Backend
 backend/__pycache__/
 backend/*.pyc
