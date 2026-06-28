@@ -14,10 +14,7 @@ app = FastAPI(title="RMS Backend API", version="1.0.0")
 # Allow the React app (localhost:5173) to call this API
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "https://mohsannaeem.github.io",
-    ],
+    allow_origins=["http://localhost:5173"],
     allow_methods=["*"],
     allow_headers=["*"],
 )

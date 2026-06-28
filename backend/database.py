@@ -1,27 +1,18 @@
-import os
 import re
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy import text
 
-_DB_URL = os.getenv("DATABASE_URL", "sqlite:///rms.db")
-
-# Supabase/Render PostgreSQL uses postgresql:// but SQLAlchemy needs psycopg2 driver
-if _DB_URL.startswith("postgresql://"):
-    _DB_URL = _DB_URL.replace("postgresql://", "postgresql+psycopg2://", 1)
-
-engine = create_engine(_DB_URL, echo=False)
+engine = create_engine("sqlite:///rms.db", echo=False)
 
 _RESULT_ID_RE = re.compile(r'_\d{8}_\d{6}$|^\d{8}_\d{6}$')
-_IS_SQLITE    = _DB_URL.startswith("sqlite")
 
 
 def create_db():
     SQLModel.metadata.create_all(engine)
-    if _IS_SQLITE:
-        _migrate_sqlite()
+    _migrate()
 
 
-def _migrate_sqlite():
+def _migrate():
     with engine.connect() as conn:
         # Add name column to test_runs if missing
         try:
@@ -35,20 +26,20 @@ def _migrate_sqlite():
         # Create run_results table if missing
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS run_results (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
                 regression_id TEXT NOT NULL,
-                project_id   TEXT NOT NULL,
-                phase        TEXT NOT NULL,
-                component    TEXT NOT NULL,
-                scheduler    TEXT NOT NULL,
-                total_tests  INTEGER DEFAULT 0,
-                passed_tests INTEGER DEFAULT 0,
-                failed_tests INTEGER DEFAULT 0,
-                status       TEXT DEFAULT 'failed',
-                log_path     TEXT,
-                start_time   TEXT,
-                end_time     TEXT,
-                executed_at  TEXT NOT NULL
+                project_id    TEXT NOT NULL,
+                phase         TEXT NOT NULL,
+                component     TEXT NOT NULL,
+                scheduler     TEXT NOT NULL,
+                total_tests   INTEGER DEFAULT 0,
+                passed_tests  INTEGER DEFAULT 0,
+                failed_tests  INTEGER DEFAULT 0,
+                status        TEXT DEFAULT 'failed',
+                log_path      TEXT,
+                start_time    TEXT,
+                end_time      TEXT,
+                executed_at   TEXT NOT NULL
             )
         """))
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_run_results_regression_id ON run_results(regression_id)"))
