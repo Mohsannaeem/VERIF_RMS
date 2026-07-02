@@ -1,27 +1,48 @@
-from fastapi import FastAPI, HTTPException, Depends
+import json
+import os
+import re
+from collections import defaultdict
+from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone, date as _date
+
+from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import APIKeyHeader
 from sqlmodel import SQLModel, Session, select
 from typing import List, Optional
-from datetime import datetime, timedelta
-from collections import defaultdict
-import re
 
 from database import create_db, get_session
 from models import Project, TestRun, RunResult, CoverageSnapshot, Schedule, IntegrationSettings
 
-app = FastAPI(title="RMS Backend API", version="1.0.0")
+# ---------------------------------------------------------------------------
+# Config from environment (override via .env or shell exports)
+# ---------------------------------------------------------------------------
+CORS_ORIGIN = os.getenv("CORS_ORIGIN", "http://localhost:5173")
+RMS_API_KEY  = os.getenv("RMS_API_KEY", "")   # empty = auth disabled
 
-# Allow the React app (localhost:5173) to call this API
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def verify_key(key: Optional[str] = Security(_api_key_header)):
+    """Optional API-key check. Skipped entirely when RMS_API_KEY is not set."""
+    if RMS_API_KEY and key != RMS_API_KEY:
+        raise HTTPException(status_code=403, detail="Invalid or missing X-API-Key header.")
+
+# ---------------------------------------------------------------------------
+# App + lifespan
+# ---------------------------------------------------------------------------
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    create_db()
+    yield
+
+app = FastAPI(title="RMS Backend API", version="1.0.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=[CORS_ORIGIN],
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-@app.on_event("startup")
-def on_startup():
-    create_db()
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +64,6 @@ class ProjectRequest(SQLModel):
 
 def _to_json_array(value: str) -> str:
     """Convert 'A, B, C'  or  '["A","B","C"]'  →  '["A","B","C"]'."""
-    import json
     value = value.strip()
     try:
         parsed = json.loads(value)
@@ -62,7 +82,7 @@ def get_projects(session: Session = Depends(get_session)):
 
 
 @app.post("/api/projects", response_model=Project)
-def create_project(body: ProjectRequest, session: Session = Depends(get_session)):
+def create_project(body: ProjectRequest, session: Session = Depends(get_session), _=Depends(verify_key)):
     existing = session.get(Project, body.id)
     phases_json     = _to_json_array(body.phases)
     components_json = _to_json_array(body.components)
@@ -117,7 +137,7 @@ class RunResultRequest(SQLModel):
 
 
 @app.post("/api/runs/result", response_model=RunResult, status_code=201)
-def push_run_result(body: RunResultRequest, session: Session = Depends(get_session)):
+def push_run_result(body: RunResultRequest, session: Session = Depends(get_session), _=Depends(verify_key)):
     """Add a new execution result row under an existing regression.
     The regression must already exist in test_runs (created via the GUI).
     Creating a new regression via this endpoint is not allowed.
@@ -129,7 +149,7 @@ def push_run_result(body: RunResultRequest, session: Session = Depends(get_sessi
             detail=f"Regression '{body.id}' not found. Create it via the GUI first, then push results."
         )
 
-    now    = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    now    = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     status = "passed" if body.failed_tests == 0 else "failed"
 
     result = RunResult(
@@ -161,6 +181,22 @@ def push_run_result(body: RunResultRequest, session: Session = Depends(get_sessi
     session.commit()
     session.refresh(result)
     return result
+
+
+@app.get("/api/runs/results", response_model=List[RunResult])
+def get_all_run_results(
+    project_id: str,
+    phase: Optional[str] = None,
+    component: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    """Bulk-fetch all run_results for a project/phase/component — avoids N+1 per regression."""
+    query = select(RunResult).where(RunResult.project_id == project_id)
+    if phase:
+        query = query.where(RunResult.phase == phase)
+    if component and component != "All Components":
+        query = query.where(RunResult.component == component)
+    return session.exec(query.order_by(RunResult.executed_at)).all()
 
 
 @app.get("/api/runs", response_model=List[TestRun])
@@ -199,8 +235,28 @@ def get_run_results(run_id: str, session: Session = Depends(get_session)):
         .order_by(RunResult.executed_at)
     ).all()
 
+@app.get("/api/runs/results", response_model=List[RunResult])
+def get_all_run_results(
+    project_id: str,
+    phase: Optional[str] = None,
+    component: Optional[str] = None,
+    session: Session = Depends(get_session),
+):
+    """Bulk fetch all execution results for a project/phase/component in one request.
+    Replaces the N+1 pattern of fetching per-regression results individually."""
+    query = (
+        select(RunResult)
+        .where(RunResult.project_id == project_id)
+    )
+    if phase:
+        query = query.where(RunResult.phase == phase)
+    if component and component != "All Components":
+        query = query.where(RunResult.component == component)
+    query = query.order_by(RunResult.executed_at)
+    return session.exec(query).all()
+
 @app.post("/api/runs", response_model=TestRun, status_code=201)
-def create_run(run: TestRun, session: Session = Depends(get_session)):
+def create_run(run: TestRun, session: Session = Depends(get_session), _=Depends(verify_key)):
     if session.get(TestRun, run.id):
         raise HTTPException(status_code=409, detail=f"Run '{run.id}' already exists. Use PATCH /api/runs/{{run_id}} to update.")
     if not run.name:
@@ -211,11 +267,11 @@ def create_run(run: TestRun, session: Session = Depends(get_session)):
     return run
 
 @app.patch("/api/runs/{run_id}", response_model=TestRun)
-def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depends(get_session)):
+def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depends(get_session), _=Depends(verify_key)):
     run = session.get(TestRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found. Create it first via POST /api/runs.")
-    for field, val in updates.dict(exclude_unset=True).items():
+    for field, val in updates.model_dump(exclude_unset=True).items():
         setattr(run, field, val)
     session.add(run)
     session.commit()
@@ -223,7 +279,7 @@ def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depend
     return run
 
 @app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str, session: Session = Depends(get_session)):
+def delete_run(run_id: str, session: Session = Depends(get_session), _=Depends(verify_key)):
     run = session.get(TestRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -260,7 +316,6 @@ def _parse_dt(end_time_str: str):
     raise ValueError(f"Unrecognised date format: {end_time_str!r}")
 
 # Anchor for bi-weekly periods — Jan 6 2025 is a Monday, gives clean even boundaries
-from datetime import date as _date
 _BIWEEKLY_ANCHOR = _date(2025, 1, 6)
 
 def _biweekly_start(dt: datetime) -> _date:
@@ -453,7 +508,7 @@ def get_latest_coverage(
     return result
 
 @app.post("/api/coverage", response_model=CoverageSnapshot)
-def create_coverage(snapshot: CoverageSnapshot, session: Session = Depends(get_session)):
+def create_coverage(snapshot: CoverageSnapshot, session: Session = Depends(get_session), _=Depends(verify_key)):
     session.add(snapshot)
     session.commit()
     session.refresh(snapshot)
@@ -475,14 +530,14 @@ def get_schedules(
     return session.exec(query).all()
 
 @app.post("/api/schedules", response_model=Schedule)
-def create_schedule(schedule: Schedule, session: Session = Depends(get_session)):
+def create_schedule(schedule: Schedule, session: Session = Depends(get_session), _=Depends(verify_key)):
     session.add(schedule)
     session.commit()
     session.refresh(schedule)
     return schedule
 
 @app.delete("/api/schedules/{schedule_id}")
-def delete_schedule(schedule_id: int, session: Session = Depends(get_session)):
+def delete_schedule(schedule_id: int, session: Session = Depends(get_session), _=Depends(verify_key)):
     s = session.get(Schedule, schedule_id)
     if not s:
         raise HTTPException(status_code=404, detail="Schedule not found")
@@ -505,7 +560,7 @@ def get_settings(project_id: str, session: Session = Depends(get_session)):
     return result
 
 @app.post("/api/settings", response_model=IntegrationSettings)
-def save_settings(settings: IntegrationSettings, session: Session = Depends(get_session)):
+def save_settings(settings: IntegrationSettings, session: Session = Depends(get_session), _=Depends(verify_key)):
     existing = session.exec(
         select(IntegrationSettings).where(IntegrationSettings.project_id == settings.project_id)
     ).first()
@@ -514,7 +569,7 @@ def save_settings(settings: IntegrationSettings, session: Session = Depends(get_
         existing.ci_job_path = settings.ci_job_path
         existing.slack_webhook = settings.slack_webhook
         existing.email_list = settings.email_list
-        existing.updated_at = datetime.now().isoformat()
+        existing.updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         session.add(existing)
         session.commit()
         session.refresh(existing)
