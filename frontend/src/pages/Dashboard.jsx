@@ -1,14 +1,27 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useReducer } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
-  LineChart, Line, PieChart, Pie, Cell,
+  LineChart, Line, Brush, PieChart, Pie, Cell,
 } from 'recharts';
 import { Target, CheckCircle, AlertTriangle, Activity } from 'lucide-react';
-import { SCHED_BUCKETS } from '../constants';
+import { SCHED_BUCKETS, TREND_DURATIONS, COLORS, PIE_COLORS, TOOLTIP_STYLE, STATUS_COLOR } from '../constants';
 
-import API from '../api';
-const COLORS = ['#58a6ff', '#8b949e', '#d29922'];
+import BASE, { api } from '../api';
+
+// ── Defined outside Dashboard to avoid "component created during render" lint error ──
+function DurationSelect({ value, onChange }) {
+  return (
+    <select
+      className="form-control"
+      style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem', height: '28px' }}
+      value={value}
+      onChange={onChange}
+    >
+      {TREND_DURATIONS.map(d => <option key={d} value={d}>{d}</option>)}
+    </select>
+  );
+}
 
 const EMPTY = {
   summary:      { total: 0, passed: 0, failed: 0, pass_rate: 0 },
@@ -17,63 +30,63 @@ const EMPTY = {
   run_count:    0,
 };
 
+// Single reducer so each effect dispatches one action instead of multiple
+// synchronous setState calls (avoids react-hooks/set-state-in-effect lint errors).
+function dashboardReducer(state, action) {
+  switch (action.type) {
+    case 'FETCH_START':  return { ...state, loading: true, error: null, data: EMPTY };
+    case 'FETCH_OK':     return { ...state, loading: false, data: action.data };
+    case 'FETCH_ERR':    return { ...state, loading: false, error: action.error };
+    case 'RUNS_OK':      return { ...state, runs: action.runs, runResultsMap: action.map, selectedRunId: action.selectedRunId };
+    default:             return state;
+  }
+}
 
 function Dashboard() {
   const { project, phase, component } = useOutletContext();
-  const [duration, setDuration]         = useState('Daily');
-  const [data, setData]                 = useState(EMPTY);
-  const [loading, setLoading]           = useState(false);
-  const [error, setError]               = useState(null);
-
-  // Scheduler health time window
+  const [duration, setDuration] = useState('Daily');
   const [schedWindow, setSchedWindow] = useState('Daily');
 
-  // Run breakdown state
-  const [runs, setRuns]                   = useState([]);
-  const [selectedRunId, setSelectedRunId] = useState('');
-  const [runResultsMap, setRunResultsMap] = useState({});  // regression_id → results[]
+  const [state, dispatch] = useReducer(dashboardReducer, {
+    loading: false, error: null, data: EMPTY,
+    runs: [], selectedRunId: '', runResultsMap: {},
+  });
+  const { loading, error, data, runs, selectedRunId, runResultsMap } = state;
 
-  // ── Fetch dashboard summary ──────────────────────────────────────────────────
+  // ── Fetch dashboard summary — single dispatch, no cascading setState ──────
   useEffect(() => {
     if (!project) return;
-    setLoading(true);
-    setError(null);
-    setData(EMPTY);
-    const params = new URLSearchParams({ project_id: project.id, phase, component, duration });
-    fetch(`${API}/api/dashboard?${params}`)
-      .then(r => { if (!r.ok) throw new Error(`Server error ${r.status}`); return r.json(); })
-      .then(d => { setData(d); setLoading(false); })
-      .catch(e => { setError(e.message); setLoading(false); });
-  }, [project?.id, phase, component, duration]);
+    dispatch({ type: 'FETCH_START' });
+    api.getDashboard({ project_id: project.id, phase, component, duration })
+      .then(d  => dispatch({ type: 'FETCH_OK',  data: d }))
+      .catch(e => dispatch({ type: 'FETCH_ERR', error: e.message }));
+  }, [project, phase, component, duration]);
 
-  // ── Fetch regressions then their execution results ───────────────────────────
+  // ── Fetch regressions + bulk results — single dispatch ───────────────────
   useEffect(() => {
     if (!project) return;
-    fetch(`${API}/api/runs?project_id=${project.id}`)
-      .then(r => r.json())
+    api.getRuns({ project_id: project.id })
       .then(raw => {
         const arr = Array.isArray(raw) ? raw : (raw.value ?? []);
         const filtered = arr.filter(r => r.phase === phase && r.component === component);
-        setRuns(filtered);
-        setSelectedRunId(prev => (filtered.find(r => r.id === prev) ? prev : (filtered[0]?.id ?? '')));
-        // Fetch execution history for each regression
-        return Promise.all(
-          filtered.map(run =>
-            fetch(`${API}/api/runs/${encodeURIComponent(run.id)}/results`)
-              .then(r => r.json())
-              .then(results => ({ id: run.id, results: Array.isArray(results) ? results : [] }))
-              .catch(() => ({ id: run.id, results: [] }))
-          )
-        );
-      })
-      .then(entries => {
-        if (!entries) return;
-        const map = {};
-        entries.forEach(e => { map[e.id] = e.results; });
-        setRunResultsMap(map);
+        const nextSelectedId = filtered.find(r => r.id === selectedRunId)
+          ? selectedRunId
+          : (filtered[0]?.id ?? '');
+
+        return api.getAllRunResults({ project_id: project.id, phase, component })
+          .then(allResults => {
+            const map = {};
+            if (Array.isArray(allResults)) {
+              allResults.forEach(r => {
+                if (!map[r.regression_id]) map[r.regression_id] = [];
+                map[r.regression_id].push(r);
+              });
+            }
+            dispatch({ type: 'RUNS_OK', runs: filtered, map, selectedRunId: nextSelectedId });
+          });
       })
       .catch(() => {});
-  }, [project?.id, phase, component]);
+  }, [project?.id, phase, component]); // eslint-disable-line react-hooks/exhaustive-deps
 
   if (!project) {
     return (
@@ -90,7 +103,7 @@ function Dashboard() {
     SCHED_BUCKETS[schedWindow]?.test(s.name) ?? true
   );
 
-  // ── Build breakdown chart: 3 lines (Total/Passed/Failed) for selected regression ──
+  // ── Build breakdown chart ────────────────────────────────────────────────
   const fmtExecDate = (str) => {
     if (!str) return '';
     const d = new Date(str);
@@ -128,7 +141,7 @@ function Dashboard() {
             No completed test runs found for <strong style={{ color: 'var(--text-primary)' }}>{project.name}</strong> / {phase}.
             <br />Add runs via the API to see charts populate here.
           </p>
-          <a href="http://localhost:8000/docs#/default/create_run_api_runs_post" target="_blank" rel="noreferrer"
+          <a href={`${BASE}/docs#/default/create_run_api_runs_post`} target="_blank" rel="noreferrer"
             style={{ display: 'inline-block', padding: '8px 20px', background: 'var(--accent-color)', color: '#fff', borderRadius: '6px', textDecoration: 'none', fontSize: '0.875rem', fontWeight: 600 }}>
             Add a Test Run via API →
           </a>
@@ -174,22 +187,17 @@ function Dashboard() {
             <div className="card">
               <div className="card-header">
                 <h3 className="card-title">Execution Trend</h3>
-                <select className="form-control" style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} value={duration} onChange={e => setDuration(e.target.value)}>
-                  <option value="Daily">Daily</option>
-                  <option value="Weekly">Weekly</option>
-                  <option value="Bi-weekly">Bi-weekly</option>
-                  <option value="Monthly">Monthly</option>
-                </select>
+                <DurationSelect value={duration} onChange={e => setDuration(e.target.value)} />
               </div>
               <div style={{ height: 300 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={trend}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                    <XAxis dataKey="name" stroke="#8b949e" />
-                    <YAxis stroke="#8b949e" />
-                    <Tooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px' }} itemStyle={{ color: '#c9d1d9' }} />
-                    <Bar dataKey="passed" stackId="a" fill="#3fb950" radius={[0, 0, 4, 4]} />
-                    <Bar dataKey="failed"  stackId="a" fill="#f85149" radius={[4, 4, 0, 0]} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3d2215" vertical={false} />
+                    <XAxis dataKey="name" stroke={COLORS.muted} />
+                    <YAxis stroke={COLORS.muted} />
+                    <Tooltip {...TOOLTIP_STYLE} />
+                    <Bar dataKey="passed" stackId="a" fill={COLORS.passed} radius={[0, 0, 4, 4]} />
+                    <Bar dataKey="failed"  stackId="a" fill={COLORS.failed}  radius={[4, 4, 0, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -198,21 +206,16 @@ function Dashboard() {
             <div className="card">
               <div className="card-header">
                 <h3 className="card-title">Pass Rate History</h3>
-                <select className="form-control" style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} value={duration} onChange={e => setDuration(e.target.value)}>
-                  <option value="Daily">Daily</option>
-                  <option value="Weekly">Weekly</option>
-                  <option value="Bi-weekly">Bi-weekly</option>
-                  <option value="Monthly">Monthly</option>
-                </select>
+                <DurationSelect value={duration} onChange={e => setDuration(e.target.value)} />
               </div>
               <div style={{ height: 300 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <LineChart data={trend}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                    <XAxis dataKey="name" stroke="#8b949e" />
-                    <YAxis stroke="#8b949e" domain={[0, 100]} />
-                    <Tooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px' }} />
-                    <Line type="monotone" dataKey="pass_rate" stroke="#58a6ff" strokeWidth={3} dot={{ fill: '#58a6ff', r: 4 }} connectNulls={false} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3d2215" vertical={false} />
+                    <XAxis dataKey="name" stroke={COLORS.muted} />
+                    <YAxis stroke={COLORS.muted} domain={[0, 100]} />
+                    <Tooltip {...TOOLTIP_STYLE} />
+                    <Line type="monotone" dataKey="pass_rate" stroke={COLORS.accent} strokeWidth={3} dot={{ fill: COLORS.accent, r: 4 }} connectNulls={false} />
                   </LineChart>
                 </ResponsiveContainer>
               </div>
@@ -236,28 +239,28 @@ function Dashboard() {
               <div style={{ height: 300 }}>
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={schedChartData} layout="vertical" margin={{ top: 5, right: 30, left: 60, bottom: 5 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#30363d" horizontal={true} vertical={false} />
-                    <XAxis type="number" stroke="#8b949e" />
-                    <YAxis dataKey="name" type="category" stroke="#8b949e" />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#3d2215" horizontal={true} vertical={false} />
+                    <XAxis type="number" stroke={COLORS.muted} />
+                    <YAxis dataKey="name" type="category" stroke={COLORS.muted} />
                     <Tooltip
                       content={({ active, payload, label }) => {
                         if (!active || !payload?.length) return null;
                         const d = payload[0]?.payload;
                         return (
-                          <div style={{ background: '#161b22', border: '1px solid #30363d', borderRadius: '8px', padding: '10px 14px', fontSize: '0.8rem', color: '#c9d1d9' }}>
-                            <p style={{ fontWeight: 700, color: '#fff', marginBottom: '6px' }}>{label}</p>
-                            <p style={{ color: '#3fb950' }}>Passed: <strong>{d?.passed}</strong></p>
-                            <p style={{ color: '#f85149' }}>Failed: <strong>{d?.failed}</strong></p>
-                            <p style={{ color: '#58a6ff' }}>Pass rate: <strong>{d?.pass_rate}%</strong></p>
-                            <p style={{ color: '#8b949e', marginTop: '6px', borderTop: '1px solid #30363d', paddingTop: '6px', fontSize: '0.72rem' }}>
+                          <div style={{ ...TOOLTIP_STYLE.contentStyle, padding: '10px 14px', fontSize: '0.8rem', color: '#f5e6d0' }}>
+                            <p style={{ fontWeight: 700, color: '#f5e6d0', marginBottom: '6px' }}>{label}</p>
+                            <p style={{ color: COLORS.passed }}>Passed: <strong>{d?.passed}</strong></p>
+                            <p style={{ color: COLORS.failed }}>Failed: <strong>{d?.failed}</strong></p>
+                            <p style={{ color: COLORS.accent }}>Pass rate: <strong>{d?.pass_rate}%</strong></p>
+                            <p style={{ color: COLORS.muted, marginTop: '6px', borderTop: '1px solid #3d2215', paddingTop: '6px', fontSize: '0.72rem' }}>
                               Run: {d?.run_id} &nbsp;·&nbsp; {d?.end_time}
                             </p>
                           </div>
                         );
                       }}
                     />
-                    <Bar dataKey="passed" stackId="a" fill="#3fb950" />
-                    <Bar dataKey="failed"  stackId="a" fill="#f85149" radius={[0, 4, 4, 0]} />
+                    <Bar dataKey="passed" stackId="a" fill={COLORS.passed} />
+                    <Bar dataKey="failed"  stackId="a" fill={COLORS.failed}  radius={[0, 4, 4, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -272,16 +275,16 @@ function Dashboard() {
                   <PieChart>
                     <Pie data={schedChartData} cx="50%" cy="50%" innerRadius={60} outerRadius={90} paddingAngle={5} dataKey="value" stroke="none">
                       {schedChartData.map((_, index) => (
-                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                        <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
                       ))}
                     </Pie>
-                    <Tooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px', color: '#fff' }} />
+                    <Tooltip {...TOOLTIP_STYLE} />
                   </PieChart>
                 </ResponsiveContainer>
                 <div style={{ position: 'absolute', bottom: 0, width: '100%', display: 'flex', justifyContent: 'center', gap: '16px' }}>
                   {schedChartData.map((entry, index) => (
                     <div key={`legend-${index}`} style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.75rem', color: 'var(--text-secondary)' }}>
-                      <div style={{ width: '10px', height: '10px', backgroundColor: COLORS[index % COLORS.length], borderRadius: '2px' }} />
+                      <div style={{ width: '10px', height: '10px', backgroundColor: PIE_COLORS[index % PIE_COLORS.length], borderRadius: '2px' }} />
                       {entry.name}
                     </div>
                   ))}
@@ -290,16 +293,15 @@ function Dashboard() {
             </div>
           </div>
 
-          {/* ── Regression Run Breakdown ─────────────────────────────────────────── */}
-          {runs.length > 0 && (
-            <div className="card">
+          {/* ── Regression Run Breakdown ─────────────────────────────────────── */}
+          <div className="card">
               <div className="card-header">
                 <h3 className="card-title">Regression Run Breakdown</h3>
                 <select
                   className="form-control"
                   style={{ width: 'auto', padding: '4px 8px', fontSize: '0.75rem', height: '28px' }}
                   value={selectedRunId}
-                  onChange={e => setSelectedRunId(e.target.value)}
+                  onChange={e => dispatch({ type: 'RUNS_OK', runs, map: runResultsMap, selectedRunId: e.target.value })}
                 >
                   {runs.map(r => (
                     <option key={r.id} value={r.id}>{r.id} — {r.module} ({r.scheduler})</option>
@@ -309,8 +311,8 @@ function Dashboard() {
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr auto', gap: '24px', alignItems: 'start' }}>
 
-                {/* 3-line chart — Total / Passed / Failed per execution */}
-                <div style={{ height: 300 }}>
+                {/* 3-line chart */}
+                <div style={{ height: 340 }}>
                   {breakdownData.length === 0 ? (
                     <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-muted)', fontSize: '0.85rem' }}>
                       No execution results yet — push results via the script.
@@ -318,20 +320,30 @@ function Dashboard() {
                   ) : (
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={breakdownData} margin={{ top: 8, right: 16, left: 0, bottom: 16 }}>
-                        <CartesianGrid strokeDasharray="3 3" stroke="#30363d" vertical={false} />
-                        <XAxis dataKey="label" stroke="#8b949e" tick={{ fontSize: 11 }} label={{ value: 'Execution', position: 'insideBottom', offset: -8, fill: '#8b949e', fontSize: 11 }} />
-                        <YAxis stroke="#8b949e" />
+                        <CartesianGrid strokeDasharray="3 3" stroke="#3d2215" vertical={false} />
+                        <XAxis dataKey="label" stroke={COLORS.muted} tick={{ fontSize: 11 }} label={{ value: 'Execution', position: 'insideBottom', offset: -8, fill: COLORS.muted, fontSize: 11 }} />
+                        <YAxis stroke={COLORS.muted} />
                         <Tooltip
-                          contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px' }}
-                          itemStyle={{ color: '#c9d1d9' }}
+                          {...TOOLTIP_STYLE}
                           labelFormatter={(label, payload) => {
                             const date = payload?.[0]?.payload?.date;
                             return `${label}${date ? ` — ${fmtExecDate(date)}` : ''}`;
                           }}
                         />
-                        <Line dataKey="total"  name="Total"  stroke="#58a6ff" strokeWidth={2} dot={{ r: 4, fill: '#58a6ff', strokeWidth: 2, stroke: '#0d1117' }} activeDot={{ r: 6 }} />
-                        <Line dataKey="passed" name="Passed" stroke="#3fb950" strokeWidth={2} dot={{ r: 4, fill: '#3fb950', strokeWidth: 2, stroke: '#0d1117' }} activeDot={{ r: 6 }} />
-                        <Line dataKey="failed" name="Failed" stroke="#f85149" strokeWidth={2} dot={{ r: 4, fill: '#f85149', strokeWidth: 2, stroke: '#0d1117' }} activeDot={{ r: 6 }} />
+                        <Line dataKey="total"  name="Total"  stroke={COLORS.accent}  strokeWidth={2} dot={{ r: 4, fill: COLORS.accent,  strokeWidth: 2, stroke: '#140c08' }} activeDot={{ r: 6 }} />
+                        <Line dataKey="passed" name="Passed" stroke={COLORS.passed} strokeWidth={2} dot={{ r: 4, fill: COLORS.passed, strokeWidth: 2, stroke: '#140c08' }} activeDot={{ r: 6 }} />
+                        <Line dataKey="failed" name="Failed" stroke={COLORS.failed}  strokeWidth={2} dot={{ r: 4, fill: COLORS.failed,  strokeWidth: 2, stroke: '#140c08' }} activeDot={{ r: 6 }} />
+                        {breakdownData.length > 20 && (
+                          <Brush
+                            dataKey="label"
+                            height={24}
+                            stroke="var(--border-color)"
+                            fill="#1a0e08"
+                            travellerWidth={8}
+                            startIndex={Math.max(0, breakdownData.length - 20)}
+                            endIndex={breakdownData.length - 1}
+                          />
+                        )}
                       </LineChart>
                     </ResponsiveContainer>
                   )}
@@ -348,14 +360,14 @@ function Dashboard() {
                     <DetailRow label="Scheduler"  value={selectedRun.scheduler} />
                     <DetailRow label="Phase"      value={selectedRun.phase} />
                     <DetailRow label="Status"     value={selectedRun.status}
-                      valueStyle={{ color: selectedRun.status === 'passed' ? '#3fb950' : selectedRun.status === 'failed' ? '#f85149' : '#d29922', fontWeight: 600, textTransform: 'capitalize' }} />
+                      valueStyle={{ color: STATUS_COLOR[selectedRun.status] ?? COLORS.muted, fontWeight: 600, textTransform: 'capitalize' }} />
                     <div style={{ margin: '12px 0', height: '1px', background: 'var(--border-color)' }} />
                     <DetailRow label="Executions" value={selectedResults.length} />
                     <DetailRow label="Total"      value={selectedRun.total_tests?.toLocaleString()} />
-                    <DetailRow label="Passed"     value={selectedRun.passed_tests?.toLocaleString()} valueStyle={{ color: '#3fb950', fontWeight: 600 }} />
-                    <DetailRow label="Failed"     value={selectedRun.failed_tests?.toLocaleString()} valueStyle={{ color: '#f85149', fontWeight: 600 }} />
+                    <DetailRow label="Passed"     value={selectedRun.passed_tests?.toLocaleString()} valueStyle={{ color: COLORS.passed, fontWeight: 600 }} />
+                    <DetailRow label="Failed"     value={selectedRun.failed_tests?.toLocaleString()} valueStyle={{ color: COLORS.failed, fontWeight: 600 }} />
                     {passRate !== null && (
-                      <div style={{ marginTop: '14px', padding: '8px 12px', background: 'rgba(88,166,255,0.08)', borderRadius: '6px', border: '1px solid var(--accent-glow)', textAlign: 'center' }}>
+                      <div style={{ marginTop: '14px', padding: '8px 12px', background: 'rgba(231,111,81,0.1)', borderRadius: '6px', border: '1px solid var(--accent-glow)', textAlign: 'center' }}>
                         <span style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--accent-color)' }}>{passRate}%</span>
                         <span style={{ display: 'block', fontSize: '0.7rem', color: 'var(--text-muted)', marginTop: '2px' }}>Latest Pass Rate</span>
                       </div>
@@ -364,7 +376,6 @@ function Dashboard() {
                 )}
               </div>
             </div>
-          )}
         </>
       )}
     </div>
