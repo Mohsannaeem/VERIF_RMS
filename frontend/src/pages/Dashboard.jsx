@@ -198,6 +198,10 @@ function Dashboard() {
                     <Tooltip {...TOOLTIP_STYLE} />
                     <Bar dataKey="passed" stackId="a" fill={COLORS.passed} radius={[0, 0, 4, 4]} />
                     <Bar dataKey="failed"  stackId="a" fill={COLORS.failed}  radius={[4, 4, 0, 0]} />
+                    {trend.length > 14 && (
+                      <Brush dataKey="name" height={24} stroke="var(--border-color)" fill="#1a0e08" travellerWidth={8}
+                        startIndex={Math.max(0, trend.length - 14)} endIndex={trend.length - 1} />
+                    )}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -216,6 +220,10 @@ function Dashboard() {
                     <YAxis stroke={COLORS.muted} domain={[0, 100]} />
                     <Tooltip {...TOOLTIP_STYLE} />
                     <Line type="monotone" dataKey="pass_rate" stroke={COLORS.accent} strokeWidth={3} dot={{ fill: COLORS.accent, r: 4 }} connectNulls={false} />
+                    {trend.length > 14 && (
+                      <Brush dataKey="name" height={24} stroke="var(--border-color)" fill="#1a0e08" travellerWidth={8}
+                        startIndex={Math.max(0, trend.length - 14)} endIndex={trend.length - 1} />
+                    )}
                   </LineChart>
                 </ResponsiveContainer>
               </div>

@@ -358,25 +358,65 @@ def _bucket_label(key: str, duration: str) -> str:
     return datetime.strptime(key, "%Y-%m-%d").strftime("%a %d")
 
 
-def _lookback_keys(duration: str) -> list[str]:
+def _data_range_keys(results: list, duration: str) -> list[str]:
+    """Return every bucket key from the oldest result's date to today.
+    Falls back to a sensible default window when there is no data."""
     now = datetime.now()
+
+    valid = [r for r in results if r.end_time]
+    if not valid:
+        # Fallback: fixed small window
+        if duration == "Weekly":
+            monday = now - timedelta(days=now.weekday())
+            return [(monday - timedelta(weeks=i)).strftime("%Y-%m-%d") for i in range(3, -1, -1)]
+        if duration == "Bi-weekly":
+            cur = _biweekly_start(now)
+            return [(cur - timedelta(days=14*i)).strftime("%Y-%m-%d") for i in range(3, -1, -1)]
+        if duration == "Monthly":
+            keys = []
+            for i in range(5, -1, -1):
+                m, y = now.month - i, now.year
+                while m <= 0: m += 12; y -= 1
+                keys.append(f"{y}-{m:02d}")
+            return keys
+        return [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
+
+    oldest = min(_parse_dt(r.end_time) for r in valid)
+
+    if duration == "Daily":
+        n_days = (now.date() - oldest.date()).days + 1
+        return [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(n_days - 1, -1, -1)]
+
     if duration == "Weekly":
-        monday = now - timedelta(days=now.weekday())
-        return [(monday - timedelta(weeks=i)).strftime("%Y-%m-%d") for i in range(3, -1, -1)]
+        # Walk week-by-week from the Monday of the oldest date's week
+        start = oldest - timedelta(days=oldest.weekday())
+        keys, cur = [], start.date()
+        monday_now = (now - timedelta(days=now.weekday())).date()
+        while cur <= monday_now:
+            keys.append(cur.strftime("%Y-%m-%d"))
+            cur += timedelta(weeks=1)
+        return keys
+
     if duration == "Bi-weekly":
-        current = _biweekly_start(now)
-        return [(current - timedelta(days=14*i)).strftime("%Y-%m-%d") for i in range(3, -1, -1)]
+        start = _biweekly_start(oldest)
+        keys, cur = [], start
+        now_bw = _biweekly_start(now)
+        while cur <= now_bw:
+            keys.append(cur.strftime("%Y-%m-%d"))
+            cur += timedelta(days=14)
+        return keys
+
     if duration == "Monthly":
         keys = []
-        for i in range(5, -1, -1):
-            month = now.month - i
-            year = now.year
-            while month <= 0:
-                month += 12
-                year -= 1
-            keys.append(f"{year}-{month:02d}")
+        y, m = oldest.year, oldest.month
+        while (y, m) <= (now.year, now.month):
+            keys.append(f"{y}-{m:02d}")
+            m += 1
+            if m > 12:
+                m, y = 1, y + 1
         return keys
-    # Daily — last 7 days
+
+    # fallback
     return [(now - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(6, -1, -1)]
 
 
@@ -425,7 +465,7 @@ def get_dashboard(
         bucket_totals[key]["failed"] += r.failed_tests
 
     trend = []
-    for key in _lookback_keys(duration):
+    for key in _data_range_keys(trend_results, duration):
         b = bucket_totals.get(key, {"passed": 0, "failed": 0})
         p, f = b["passed"], b["failed"]
         total_bucket = p + f
