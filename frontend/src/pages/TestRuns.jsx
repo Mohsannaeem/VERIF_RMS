@@ -1,64 +1,18 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, Fragment } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { Plus, Trash2, ExternalLink, X, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
-import { SCHEDULER_MODES } from '../constants';
+import { Plus, Trash2, ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { SCHEDULER_MODES, COLORS, STATUS_COLOR } from '../constants';
+import { Modal, Field, SelectField, ModalFooter } from '../components/ui/Modal.jsx';
+import { api } from '../api';
 
-import API from '../api';
-
-const STATUS_COLOR = {
-  scheduled: '#8b949e',
-  running:   '#d29922',
-  passed:    '#3fb950',
-  failed:    '#f85149',
-};
-
-function Modal({ title, onClose, children }) {
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)' }}
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{ background: 'var(--bg-color-secondary)', border: '1px solid var(--border-color)', borderRadius: '12px', width: '460px', boxShadow: '0 24px 48px rgba(0,0,0,0.4)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 24px 0' }}>
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)' }}>{title}</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px', display: 'flex', borderRadius: '4px' }}>
-            <X size={18} />
-          </button>
-        </div>
-        <div style={{ padding: '20px 24px 24px' }}>{children}</div>
-      </div>
-    </div>
-  );
-}
-
-function Field({ label, hint, ...props }) {
-  return (
-    <div style={{ marginBottom: '16px' }}>
-      <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>
-      <input className="form-control" style={{ width: '100%', boxSizing: 'border-box' }} {...props} />
-      {hint && <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: 'var(--text-muted)' }}>{hint}</p>}
-    </div>
-  );
-}
-
-function SelectField({ label, children, ...props }) {
-  return (
-    <div style={{ marginBottom: '16px' }}>
-      <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>
-      <select className="form-control" style={{ width: '100%', boxSizing: 'border-box' }} {...props}>{children}</select>
-    </div>
-  );
-}
-
-// ── Execution history sub-table ────────────────────────────────────────────────
+// ── Execution history sub-table ───────────────────────────────────────────────
 function RunResultsRows({ regressionId, formatDt }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit]     = useState(10);
 
   useEffect(() => {
-    fetch(`${API}/api/runs/${encodeURIComponent(regressionId)}/results`)
-      .then(r => r.json())
+    api.getRunResults(regressionId)
       .then(data => { setResults(Array.isArray(data) ? data : []); setLoading(false); })
       .catch(() => setLoading(false));
   }, [regressionId]);
@@ -79,7 +33,6 @@ function RunResultsRows({ regressionId, formatDt }) {
 
   return (
     <>
-      {/* Controls row */}
       <tr style={{ background: 'var(--bg-color-tertiary)' }}>
         <td colSpan="10" style={{ padding: '6px 48px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
@@ -100,23 +53,19 @@ function RunResultsRows({ regressionId, formatDt }) {
           </div>
         </td>
       </tr>
-
-      {/* Result rows */}
       {visible.map(r => (
         <tr key={r.id} style={{ background: 'rgba(88,166,255,0.03)', borderLeft: '3px solid var(--accent-glow)' }}>
-          <td style={{ paddingLeft: '48px', fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-muted)' }}>
-            #{r.id}
-          </td>
+          <td style={{ paddingLeft: '48px', fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-muted)' }}>#{r.id}</td>
           <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{r.scheduler}</td>
           <td>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS_COLOR[r.status] ?? '#8b949e', display: 'inline-block' }} />
+              <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS_COLOR[r.status] ?? COLORS.muted, display: 'inline-block' }} />
               <span style={{ textTransform: 'capitalize', fontSize: '0.82rem' }}>{r.status}</span>
             </div>
           </td>
           <td style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{r.total_tests || '—'}</td>
-          <td style={{ textAlign: 'center', color: '#3fb950', fontWeight: 600, fontSize: '0.85rem' }}>{r.passed_tests || '—'}</td>
-          <td style={{ textAlign: 'center', color: '#f85149', fontWeight: 600, fontSize: '0.85rem' }}>{r.failed_tests || '—'}</td>
+          <td style={{ textAlign: 'center', color: COLORS.passed, fontWeight: 600, fontSize: '0.85rem' }}>{r.passed_tests || '—'}</td>
+          <td style={{ textAlign: 'center', color: COLORS.failed, fontWeight: 600, fontSize: '0.85rem' }}>{r.failed_tests || '—'}</td>
           <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{formatDt(r.start_time)}</td>
           <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{formatDt(r.executed_at)}</td>
           <td style={{ textAlign: 'right' }}>
@@ -132,7 +81,7 @@ function RunResultsRows({ regressionId, formatDt }) {
   );
 }
 
-// ── Main component ─────────────────────────────────────────────────────────────
+// ── Main component ────────────────────────────────────────────────────────────
 function TestRuns() {
   const { project, phase, component } = useOutletContext();
 
@@ -146,20 +95,20 @@ function TestRuns() {
   const [saving, setSaving]       = useState(false);
   const [formError, setFormError] = useState('');
 
-  const fetchRuns = () => {
+  // useCallback — deps use `project` (not `project?.id`) to satisfy memoization rule
+  const fetchRuns = useCallback(() => {
     if (!project) return;
-    setLoading(true);
-    fetch(`${API}/api/runs?project_id=${project.id}`)
-      .then(r => r.json())
+    api.getRuns({ project_id: project.id })
       .then(raw => {
         const arr = Array.isArray(raw) ? raw : (raw.value ?? []);
         setRuns(arr.filter(r => r.phase === phase && r.component === component));
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  };
+    setLoading(true);
+  }, [project, phase, component]);
 
-  useEffect(() => { fetchRuns(); }, [project?.id, phase, component]);
+  useEffect(() => { fetchRuns(); }, [fetchRuns]); // eslint-disable-line react-hooks/set-state-in-effect
 
   const toggleExpand = (id) => setExpanded(prev => {
     const next = new Set(prev);
@@ -172,7 +121,7 @@ function TestRuns() {
   const filteredRuns = runs.filter(run => {
     if (filters.id        && !(run.name || run.id).toLowerCase().includes(filters.id.toLowerCase())) return false;
     if (filters.module    && !run.module.toLowerCase().includes(filters.module.toLowerCase())) return false;
-    if (filters.status    !== 'all' && run.status !== filters.status) return false;
+    if (filters.status    !== 'all' && run.status    !== filters.status)    return false;
     if (filters.scheduler !== 'all' && run.scheduler !== filters.scheduler) return false;
     return true;
   });
@@ -183,32 +132,32 @@ function TestRuns() {
     setModalOpen(true);
   };
   const closeModal = () => { setModalOpen(false); setSaving(false); setFormError(''); };
-  const setField = (k, v) => setForm(f => ({ ...f, [k]: v }));
+  const setField   = (k, v) => setForm(f => ({ ...f, [k]: v }));
 
   const handleCreate = async () => {
-    if (!form.id.trim())       { setFormError('Run ID is required.'); return; }
-    if (!form.module.trim())   { setFormError('Module is required.'); return; }
+    if (!form.id.trim())        { setFormError('Run ID is required.');    return; }
+    if (!form.module.trim())    { setFormError('Module is required.');     return; }
     if (!form.scheduler.trim()) { setFormError('Scheduler is required.'); return; }
     setSaving(true); setFormError('');
     try {
-      const res = await fetch(`${API}/api/runs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: form.id.trim(), project_id: project.id, phase, component,
-          module: form.module.trim(), scheduler: form.scheduler.trim(),
-          status: 'scheduled', progress: 0,
-          start_time: form.start_time || new Date().toISOString(),
-          end_time: null, total_tests: 0, passed_tests: 0, failed_tests: 0, log_path: null,
-        }),
+      await api.createRun({
+        id: form.id.trim(), project_id: project.id, phase, component,
+        module: form.module.trim(), scheduler: form.scheduler.trim(),
+        status: 'scheduled', progress: 0,
+        start_time: form.start_time || new Date().toISOString(),
+        end_time: null, total_tests: 0, passed_tests: 0, failed_tests: 0, log_path: null,
       });
-      if (!res.ok) throw new Error(await res.text());
-      closeModal(); fetchRuns();
-    } catch (e) { setFormError(e.message || 'Failed to create run.'); setSaving(false); }
+      closeModal();
+      fetchRuns();
+    } catch (e) {
+      setFormError(e.message || 'Failed to create run.');
+      setSaving(false);
+    }
   };
 
   const handleDelete = async (id) => {
-    try { await fetch(`${API}/api/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }); } catch (_) {}
+    if (!window.confirm(`Delete regression "${id}" and all its execution history? This cannot be undone.`)) return;
+    try { await api.deleteRun(id); } catch (e) { console.warn('Delete failed:', e); }
     setRuns(prev => prev.filter(r => r.id !== id));
   };
 
@@ -280,9 +229,8 @@ function TestRuns() {
               {filteredRuns.map(run => {
                 const isOpen = expanded.has(run.id);
                 return (
-                  <>
-                    {/* ── Regression row ── */}
-                    <tr key={run.id} style={{ cursor: 'pointer' }} onClick={() => toggleExpand(run.id)}>
+                  <Fragment key={run.id}>
+                    <tr style={{ cursor: 'pointer' }} onClick={() => toggleExpand(run.id)}>
                       <td style={{ paddingLeft: '12px', color: 'var(--text-secondary)' }}>
                         {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
                       </td>
@@ -290,14 +238,14 @@ function TestRuns() {
                       <td>{run.module}</td>
                       <td>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR[run.status] ?? '#8b949e', display: 'inline-block', flexShrink: 0 }} />
+                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR[run.status] ?? COLORS.muted, display: 'inline-block', flexShrink: 0 }} />
                           <span style={{ textTransform: 'capitalize', fontSize: '0.85rem' }}>{run.status}</span>
                         </div>
                       </td>
                       <td>{run.scheduler}</td>
                       <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{run.total_tests || '—'}</td>
-                      <td style={{ textAlign: 'center', color: '#3fb950', fontWeight: 600 }}>{run.passed_tests || '—'}</td>
-                      <td style={{ textAlign: 'center', color: '#f85149', fontWeight: 600 }}>{run.failed_tests || '—'}</td>
+                      <td style={{ textAlign: 'center', color: COLORS.passed, fontWeight: 600 }}>{run.passed_tests || '—'}</td>
+                      <td style={{ textAlign: 'center', color: COLORS.failed, fontWeight: 600 }}>{run.failed_tests || '—'}</td>
                       <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{formatDt(run.end_time)}</td>
                       <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
                         <button className="btn btn-danger" style={{ padding: '5px' }} title="Delete regression" onClick={() => handleDelete(run.id)}>
@@ -305,8 +253,6 @@ function TestRuns() {
                         </button>
                       </td>
                     </tr>
-
-                    {/* ── Execution history (expanded) ── */}
                     {isOpen && (
                       <>
                         <tr style={{ background: 'var(--bg-color-tertiary)' }}>
@@ -317,7 +263,7 @@ function TestRuns() {
                         <RunResultsRows regressionId={run.id} formatDt={formatDt} />
                       </>
                     )}
-                  </>
+                  </Fragment>
                 );
               })}
               {!loading && filteredRuns.length === 0 && (
@@ -353,15 +299,9 @@ function TestRuns() {
             </div>
           </div>
           <div style={{ padding: '10px 14px', background: 'rgba(88,166,255,0.06)', border: '1px solid var(--accent-glow)', borderRadius: '8px', fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: '16px' }}>
-            Status will be <strong style={{ color: '#8b949e' }}>Scheduled</strong>. Push results later via the script.
+            Status will be <strong style={{ color: COLORS.muted }}>Scheduled</strong>. Push results later via the script.
           </div>
-          {formError && <p style={{ fontSize: '0.8rem', color: 'var(--error-color)', marginBottom: '12px' }}>{formError}</p>}
-          <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-            <button className="btn btn-secondary" onClick={closeModal} disabled={saving}>Cancel</button>
-            <button className="btn btn-primary" onClick={handleCreate} disabled={saving} style={{ minWidth: '130px' }}>
-              {saving ? 'Creating…' : 'Create Regression'}
-            </button>
-          </div>
+          <ModalFooter error={formError} saving={saving} onCancel={closeModal} onSave={handleCreate} saveLabel="Create Regression" />
         </Modal>
       )}
     </div>

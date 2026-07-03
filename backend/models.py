@@ -3,6 +3,11 @@ from datetime import datetime, timezone
 from sqlmodel import SQLModel, Field
 
 
+def _now_utc() -> str:
+    """Return current UTC time as ISO string (consistent across all models)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
 class Project(SQLModel, table=True):
     id: str = Field(primary_key=True)        # 'p1', 'p2', 'p3'
     name: str
@@ -47,9 +52,7 @@ class RunResult(SQLModel, table=True):
     log_path: Optional[str] = None
     start_time: Optional[str] = None
     end_time: Optional[str] = None
-    executed_at: str = Field(
-        default_factory=lambda: datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    )
+    executed_at: str = Field(default_factory=_now_utc)
 
 
 class CoverageSnapshot(SQLModel, table=True):
@@ -64,7 +67,7 @@ class CoverageSnapshot(SQLModel, table=True):
     toggle_coverage: float
     fsm_coverage: float
     condition_coverage: float
-    recorded_at: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    recorded_at: str = Field(default_factory=_now_utc)
 
 
 class Schedule(SQLModel, table=True):
@@ -75,8 +78,8 @@ class Schedule(SQLModel, table=True):
     module: str
     frequency: str                            # 'Daily at 00:00 UTC', etc.
     branch: str
-    enabled: int = 1                          # 1 = active, 0 = paused
-    created_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    enabled: bool = True                       # True = active, False = paused
+    created_at: str = Field(default_factory=_now_utc)
 
 
 class IntegrationSettings(SQLModel, table=True):
@@ -88,4 +91,4 @@ class IntegrationSettings(SQLModel, table=True):
     ci_job_path: str = ""
     slack_webhook: str = ""
     email_list: str = ""
-    updated_at: str = Field(default_factory=lambda: datetime.now().isoformat())
+    updated_at: str = Field(default_factory=_now_utc)

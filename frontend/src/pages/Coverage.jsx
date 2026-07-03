@@ -2,6 +2,7 @@ import React, { useMemo } from 'react';
 import { useOutletContext } from 'react-router-dom';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts';
 import { Layers, ListTree, Repeat, Shuffle } from 'lucide-react';
+import { TOOLTIP_STYLE } from '../constants';
 
 export default function Coverage() {
   const { project, phase, component } = useOutletContext();
@@ -47,7 +48,7 @@ export default function Coverage() {
                   <Cell fill="var(--success-color)" />
                   <Cell fill="var(--bg-color-tertiary)" />
                 </Pie>
-                <RechartsTooltip contentStyle={{ backgroundColor: '#161b22', border: '1px solid #30363d', borderRadius: '8px', color: '#fff' }} />
+                <RechartsTooltip {...TOOLTIP_STYLE} />
               </PieChart>
             </ResponsiveContainer>
             <div style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center' }}>
