@@ -113,9 +113,9 @@ function Dashboard() {
   const selectedRun     = runs.find(r => r.id === selectedRunId) ?? null;
   const selectedResults = runResultsMap[selectedRunId] || [];
   const breakdownData   = selectedResults.map((r, i) => ({
-    label:  fmtExecDate(r.executed_at),
+    label:  fmtExecDate(r.end_time || r.executed_at),
     index:  i + 1,
-    date:   r.executed_at,
+    date:   r.end_time || r.executed_at,
     total:  r.total_tests  || 0,
     passed: r.passed_tests || 0,
     failed: r.failed_tests || 0,

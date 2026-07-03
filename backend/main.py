@@ -232,7 +232,7 @@ def get_run_results(run_id: str, session: Session = Depends(get_session)):
     return session.exec(
         select(RunResult)
         .where(RunResult.regression_id == run_id)
-        .order_by(RunResult.executed_at)
+        .order_by(RunResult.end_time)
     ).all()
 
 @app.get("/api/runs/results", response_model=List[RunResult])
@@ -252,7 +252,7 @@ def get_all_run_results(
         query = query.where(RunResult.phase == phase)
     if component and component != "All Components":
         query = query.where(RunResult.component == component)
-    query = query.order_by(RunResult.executed_at)
+    query = query.order_by(RunResult.end_time)
     return session.exec(query).all()
 
 @app.post("/api/runs", response_model=TestRun, status_code=201)
