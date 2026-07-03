@@ -113,7 +113,8 @@ function Dashboard() {
   const selectedRun     = runs.find(r => r.id === selectedRunId) ?? null;
   const selectedResults = runResultsMap[selectedRunId] || [];
   const breakdownData   = selectedResults.map((r, i) => ({
-    label:  `#${i + 1}`,
+    label:  fmtExecDate(r.executed_at),
+    index:  i + 1,
     date:   r.executed_at,
     total:  r.total_tests  || 0,
     passed: r.passed_tests || 0,
@@ -329,13 +330,13 @@ function Dashboard() {
                     <ResponsiveContainer width="100%" height="100%">
                       <LineChart data={breakdownData} margin={{ top: 8, right: 16, left: 0, bottom: 16 }}>
                         <CartesianGrid strokeDasharray="3 3" stroke="#3d2215" vertical={false} />
-                        <XAxis dataKey="label" stroke={COLORS.muted} tick={{ fontSize: 11 }} label={{ value: 'Execution', position: 'insideBottom', offset: -8, fill: COLORS.muted, fontSize: 11 }} />
+                        <XAxis dataKey="label" stroke={COLORS.muted} tick={{ fontSize: 10 }} angle={-35} textAnchor="end" height={56} interval="preserveStartEnd" />
                         <YAxis stroke={COLORS.muted} />
                         <Tooltip
                           {...TOOLTIP_STYLE}
                           labelFormatter={(label, payload) => {
-                            const date = payload?.[0]?.payload?.date;
-                            return `${label}${date ? ` — ${fmtExecDate(date)}` : ''}`;
+                            const idx = payload?.[0]?.payload?.index;
+                            return idx ? `#${idx} — ${label}` : label;
                           }}
                         />
                         <Line dataKey="total"  name="Total"  stroke={COLORS.accent}  strokeWidth={2} dot={{ r: 4, fill: COLORS.accent,  strokeWidth: 2, stroke: '#140c08' }} activeDot={{ r: 6 }} />
