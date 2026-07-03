@@ -1,40 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, PlaySquare, CalendarClock, Settings as SettingsIcon, Bell, FolderOpen, PieChart, Loader, Plus, ChevronDown, X } from 'lucide-react';
+import { LayoutDashboard, PlaySquare, CalendarClock, Settings as SettingsIcon, Bell, FolderOpen, PieChart, Loader, Plus, ChevronDown, Sun, Moon } from 'lucide-react';
 import clsx from 'clsx';
 
-import API from '../api';
+import BASE, { api } from '../api';
+import { Modal, Field, ModalFooter } from './ui/Modal.jsx';
 
-// ── Modal shell ────────────────────────────────────────────────────────────────
-function Modal({ title, onClose, children }) {
-  return (
-    <div
-      style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.6)', backdropFilter: 'blur(2px)' }}
-      onMouseDown={e => { if (e.target === e.currentTarget) onClose(); }}
-    >
-      <div style={{ background: 'var(--bg-color-secondary)', border: '1px solid var(--border-color)', borderRadius: '12px', width: '420px', boxShadow: '0 24px 48px rgba(0,0,0,0.4)' }}>
-        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '20px 24px 0' }}>
-          <h3 style={{ fontSize: '1rem', fontWeight: 600, color: 'var(--text-primary)' }}>{title}</h3>
-          <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-secondary)', padding: '4px', display: 'flex', borderRadius: '4px' }}>
-            <X size={18} />
-          </button>
-        </div>
-        <div style={{ padding: '20px 24px 24px' }}>{children}</div>
-      </div>
-    </div>
-  );
-}
-
-// ── Labelled input row ─────────────────────────────────────────────────────────
-function Field({ label, hint, ...props }) {
-  return (
-    <div style={{ marginBottom: '16px' }}>
-      <label style={{ display: 'block', fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-secondary)', marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.04em' }}>{label}</label>
-      <input className="form-control" style={{ width: '100%', boxSizing: 'border-box' }} {...props} />
-      {hint && <p style={{ margin: '4px 0 0', fontSize: '0.75rem', color: 'var(--text-muted)' }}>{hint}</p>}
-    </div>
-  );
-}
+// ── Page title lookup (replaces switch statement) ──────────────────────────
+const PAGE_TITLES = {
+  '/dashboard': 'Consolidated Results Dashboard',
+  '/runs':      'Regression Test Runs',
+  '/coverage':  'VCS Code & Functional Coverage',
+  '/scheduler': 'Regression Scheduler',
+  '/settings':  'Integrations & Notifications',
+};
 
 function Layout() {
   const location = useLocation();
@@ -46,6 +25,7 @@ function Layout() {
   const [component, setComponent] = useState('');
 
   // Dropdown + modal state
+  const [theme, setTheme]         = useState(() => localStorage.getItem('rms-theme') || 'dark');
   const [dropOpen, setDropOpen]   = useState(false);
   const [modal, setModal]         = useState(null);   // 'project' | 'phase' | 'component'
   const [form, setForm]           = useState({});
@@ -53,17 +33,24 @@ function Layout() {
   const [formError, setFormError] = useState('');
   const dropRef                   = useRef(null);
 
-  // ── Close dropdown on outside click ──────────────────────────────────────────
+  // ── Theme toggle ─────────────────────────────────────────────────────────
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    localStorage.setItem('rms-theme', theme);
+  }, [theme]);
+
+  const toggleTheme = () => setTheme(t => t === 'dark' ? 'light' : 'dark');
+
+  // ── Close dropdown on outside click ──────────────────────────────────────
   useEffect(() => {
     const handler = e => { if (dropRef.current && !dropRef.current.contains(e.target)) setDropOpen(false); };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // ── Load projects ─────────────────────────────────────────────────────────────
+  // ── Load projects ─────────────────────────────────────────────────────────
   const loadProjects = (selectId = null, selectPhase = null, selectComponent = null) => {
-    return fetch(`${API}/api/projects`)
-      .then(r => r.json())
+    return api.getProjects()
       .then(data => {
         const parsed = data.map(p => ({
           ...p,
@@ -74,7 +61,7 @@ function Layout() {
         const target = selectId ? parsed.find(p => p.id === selectId) : (parsed.length > 0 ? parsed[0] : null);
         if (target) {
           setProject(target);
-          setPhase(selectPhase    && target.phases.includes(selectPhase)     ? selectPhase     : target.phases[0]);
+          setPhase(selectPhase    && target.phases.includes(selectPhase)         ? selectPhase     : target.phases[0]);
           setComponent(selectComponent && target.components.includes(selectComponent) ? selectComponent : target.components[0]);
         }
         setLoading(false);
@@ -91,7 +78,7 @@ function Layout() {
     setComponent(p.components[0]);
   };
 
-  // ── Open a modal ──────────────────────────────────────────────────────────────
+  // ── Open a modal ──────────────────────────────────────────────────────────
   const openModal = (type) => {
     setDropOpen(false);
     setFormError('');
@@ -106,10 +93,9 @@ function Layout() {
   };
 
   const closeModal = () => { setModal(null); setSaving(false); setFormError(''); };
+  const setField   = (key, val) => setForm(f => ({ ...f, [key]: val }));
 
-  const setField = (key, val) => setForm(f => ({ ...f, [key]: val }));
-
-  // ── Submit handlers ───────────────────────────────────────────────────────────
+  // ── Submit handlers ───────────────────────────────────────────────────────
   const handleSave = async () => {
     setSaving(true);
     setFormError('');
@@ -120,12 +106,7 @@ function Layout() {
           setSaving(false);
           return;
         }
-        const res = await fetch(`${API}/api/projects`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: form.id.trim(), name: form.name.trim(), phases: form.phases, components: form.components }),
-        });
-        if (!res.ok) throw new Error(await res.text());
+        await api.saveProject({ id: form.id.trim(), name: form.name.trim(), phases: form.phases, components: form.components });
         await loadProjects(form.id.trim());
 
       } else if (modal === 'phase') {
@@ -133,12 +114,7 @@ function Layout() {
         const newPhase = form.phase.trim();
         if (project.phases.includes(newPhase)) { setFormError('This phase already exists.'); setSaving(false); return; }
         const updatedPhases = [...project.phases, newPhase];
-        const res = await fetch(`${API}/api/projects`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: project.id, name: project.name, phases: JSON.stringify(updatedPhases), components: JSON.stringify(project.components) }),
-        });
-        if (!res.ok) throw new Error(await res.text());
+        await api.saveProject({ id: project.id, name: project.name, phases: JSON.stringify(updatedPhases), components: JSON.stringify(project.components) });
         await loadProjects(project.id, newPhase, component);
 
       } else if (modal === 'component') {
@@ -146,29 +122,13 @@ function Layout() {
         const newComp = form.component.trim();
         if (project.components.includes(newComp)) { setFormError('This component already exists.'); setSaving(false); return; }
         const updatedComponents = [...project.components, newComp];
-        const res = await fetch(`${API}/api/projects`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: project.id, name: project.name, phases: JSON.stringify(project.phases), components: JSON.stringify(updatedComponents) }),
-        });
-        if (!res.ok) throw new Error(await res.text());
+        await api.saveProject({ id: project.id, name: project.name, phases: JSON.stringify(project.phases), components: JSON.stringify(updatedComponents) });
         await loadProjects(project.id, phase, newComp);
       }
       closeModal();
     } catch (e) {
       setFormError(e.message || 'Save failed.');
       setSaving(false);
-    }
-  };
-
-  const getPageTitle = (pathname) => {
-    switch (pathname) {
-      case '/dashboard': return 'Consolidated Results Dashboard';
-      case '/runs':      return 'Regression Test Runs';
-      case '/coverage':  return 'VCS Code & Functional Coverage';
-      case '/scheduler': return 'Regression Scheduler';
-      case '/settings':  return 'Integrations & Notifications';
-      default:           return 'RMS Platform';
     }
   };
 
@@ -203,7 +163,9 @@ function Layout() {
       <div className="main-wrapper">
         <header className="topbar">
           <div className="topbar-title" style={{ display: 'flex', alignItems: 'center' }}>
-            <h2 style={{ fontSize: '1.15rem', fontWeight: 600 }}>{getPageTitle(location.pathname)}</h2>
+            <h2 style={{ fontSize: '1.15rem', fontWeight: 600 }}>
+              {PAGE_TITLES[location.pathname] ?? 'RMS Platform'}
+            </h2>
 
             {/* Project / Phase / Component selectors */}
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginLeft: '32px', paddingLeft: '32px', borderLeft: '1px solid var(--border-color)', height: '32px' }}>
@@ -280,8 +242,14 @@ function Layout() {
               )}
             </div>
 
-            <button className="btn btn-secondary" style={{ padding: '8px', display: 'flex' }}>
-              <Bell size={18} />
+            {/* Theme toggle */}
+            <button className="btn-icon" onClick={toggleTheme} title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
+              {theme === 'dark' ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+
+            {/* Bell — disabled until notification feature is implemented */}
+            <button className="btn-icon" disabled title="Notifications coming soon">
+              <Bell size={17} />
             </button>
           </div>
         </header>
@@ -296,10 +264,10 @@ function Layout() {
       {/* ── Modals ── */}
       {modal === 'project' && (
         <Modal title="Create New Project" onClose={closeModal}>
-          <Field label="Project ID" placeholder="e.g. P2" value={form.id} onChange={e => setField('id', e.target.value)} />
-          <Field label="Project Name" placeholder="e.g. AXIS DMA" value={form.name} onChange={e => setField('name', e.target.value)} />
-          <Field label="Phases" hint="Comma-separated — e.g. Q0, Q1, Q2" placeholder="Q0, Q1, Q2" value={form.phases} onChange={e => setField('phases', e.target.value)} />
-          <Field label="Components" hint="Comma-separated — e.g. DMA, FIFO" placeholder="DMA" value={form.components} onChange={e => setField('components', e.target.value)} />
+          <Field label="Project ID"   placeholder="e.g. P2"       value={form.id}         onChange={e => setField('id',         e.target.value)} />
+          <Field label="Project Name" placeholder="e.g. AXIS DMA" value={form.name}       onChange={e => setField('name',       e.target.value)} />
+          <Field label="Phases"       hint="Comma-separated — e.g. Q0, Q1, Q2" placeholder="Q0, Q1, Q2" value={form.phases}     onChange={e => setField('phases',     e.target.value)} />
+          <Field label="Components"   hint="Comma-separated — e.g. DMA, FIFO"  placeholder="DMA"        value={form.components} onChange={e => setField('components', e.target.value)} />
           <ModalFooter error={formError} saving={saving} onCancel={closeModal} onSave={handleSave} saveLabel="Create Project" />
         </Modal>
       )}
@@ -329,8 +297,7 @@ function Layout() {
   );
 }
 
-// ── Small reusable pieces ──────────────────────────────────────────────────────
-
+// ── Small reusable pieces ──────────────────────────────────────────────────
 function DropItem({ icon, label, sub, onClick }) {
   const [hover, setHover] = useState(false);
   return (
@@ -346,20 +313,6 @@ function DropItem({ icon, label, sub, onClick }) {
         <span style={{ display: 'block', fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '1px' }}>{sub}</span>
       </span>
     </button>
-  );
-}
-
-function ModalFooter({ error, saving, onCancel, onSave, saveLabel }) {
-  return (
-    <>
-      {error && <p style={{ fontSize: '0.8rem', color: 'var(--error-color)', marginBottom: '12px' }}>{error}</p>}
-      <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-        <button className="btn btn-secondary" onClick={onCancel} disabled={saving}>Cancel</button>
-        <button className="btn btn-primary" onClick={onSave} disabled={saving} style={{ minWidth: '110px' }}>
-          {saving ? 'Saving…' : saveLabel}
-        </button>
-      </div>
-    </>
   );
 }
 

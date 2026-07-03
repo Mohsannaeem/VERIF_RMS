@@ -1,8 +1,10 @@
+import os
 import re
 from sqlmodel import create_engine, Session, SQLModel
 from sqlalchemy import text
 
-engine = create_engine("sqlite:///rms.db", echo=False)
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///rms.db")
+engine = create_engine(DATABASE_URL, echo=False)
 
 _RESULT_ID_RE = re.compile(r'_\d{8}_\d{6}$|^\d{8}_\d{6}$')
 
