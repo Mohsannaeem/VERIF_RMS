@@ -1,3 +1,5 @@
+import { getApiKey } from './auth';
+
 const BASE = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 /** Base URL — use this for constructing links (e.g. Swagger docs link). */
@@ -7,8 +9,15 @@ export default BASE;
 // Internal helper
 // ---------------------------------------------------------------------------
 async function request(path, options = {}) {
+  // Attach the browser's key when it holds one. Reads are unauthenticated, but
+  // sending it regardless keeps every call on one code path.
+  const key = getApiKey();
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...options.headers },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(key && { 'X-API-Key': key }),
+      ...options.headers,
+    },
     ...options,
   });
   if (!res.ok) {
@@ -80,6 +89,17 @@ export const api = {
 
   deleteSchedule: (id) =>
     request(`/api/schedules/${id}`, { method: 'DELETE' }),
+
+  // API keys
+  getApiKeys: (params) =>
+    request(`/api/keys${params ? `?${new URLSearchParams(params)}` : ''}`),
+
+  /** Returns the raw key in `key` — the only time it is ever available. */
+  createApiKey: (body) =>
+    request('/api/keys', { method: 'POST', body: JSON.stringify(body) }),
+
+  deleteApiKey: (id) =>
+    request(`/api/keys/${id}`, { method: 'DELETE' }),
 
   // Settings
   getSettings: (projectId) =>

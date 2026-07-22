@@ -1,6 +1,8 @@
+import hashlib
 import json
 import os
 import re
+import secrets
 from collections import defaultdict
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone, date as _date
@@ -12,7 +14,7 @@ from sqlmodel import SQLModel, Session, select
 from typing import List, Optional
 
 from database import create_db, get_session
-from models import Project, TestRun, RunResult, CoverageSnapshot, Schedule, IntegrationSettings
+from models import Project, TestRun, RunResult, CoverageSnapshot, Schedule, IntegrationSettings, ApiKey, _now_utc
 
 # ---------------------------------------------------------------------------
 # Config from environment (override via .env or shell exports)
@@ -22,10 +24,44 @@ RMS_API_KEY  = os.getenv("RMS_API_KEY", "")   # empty = auth disabled
 
 _api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
-async def verify_key(key: Optional[str] = Security(_api_key_header)):
-    """Optional API-key check. Skipped entirely when RMS_API_KEY is not set."""
-    if RMS_API_KEY and key != RMS_API_KEY:
+
+def _generate_api_key() -> tuple[str, str, str]:
+    """Return (raw, prefix, sha256_hash). The raw value is never persisted."""
+    raw    = "rms_" + secrets.token_urlsafe(32)
+    prefix = raw[:12]
+    hashed = hashlib.sha256(raw.encode()).hexdigest()
+    return raw, prefix, hashed
+
+
+def _hash_key(raw: str) -> str:
+    return hashlib.sha256(raw.encode()).hexdigest()
+
+
+async def verify_key(
+    key: Optional[str] = Security(_api_key_header),
+    session: Session = Depends(get_session),
+):
+    """Authenticate a write request against the env var, then the api_keys table.
+
+    Open mode: when neither RMS_API_KEY nor any stored key exists, auth is
+    skipped entirely, preserving the behaviour of a fresh install.
+    """
+    has_stored_keys = session.exec(select(ApiKey)).first() is not None
+    if not RMS_API_KEY and not has_stored_keys:
+        return
+
+    if RMS_API_KEY and key == RMS_API_KEY:
+        return
+
+    # Compare hashes, never raw values. An empty header cannot match a real key,
+    # but hash it anyway so the failure path costs the same either way.
+    row = session.exec(select(ApiKey).where(ApiKey.key_hash == _hash_key(key or ""))).first()
+    if not row:
         raise HTTPException(status_code=403, detail="Invalid or missing X-API-Key header.")
+
+    row.last_used_at = _now_utc()
+    session.add(row)
+    session.commit()
 
 # ---------------------------------------------------------------------------
 # App + lifespan
@@ -603,3 +639,66 @@ def save_settings(settings: IntegrationSettings, session: Session = Depends(get_
     session.commit()
     session.refresh(settings)
     return settings
+
+
+# ---------------------------------------------------------------------------
+# API Keys
+# ---------------------------------------------------------------------------
+
+class ApiKeyRequest(SQLModel):
+    name: str
+    project_id: Optional[str] = None
+
+
+class ApiKeyPublic(SQLModel):
+    """A key as exposed by the API — hash and raw value deliberately absent."""
+    id: int
+    name: str
+    prefix: str
+    project_id: Optional[str] = None
+    created_at: str
+    last_used_at: Optional[str] = None
+
+
+class ApiKeyCreated(ApiKeyPublic):
+    """Creation response only. `key` is the raw value and is never returned again."""
+    key: str
+
+
+@app.post("/api/keys", response_model=ApiKeyCreated, status_code=201)
+def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session), _=Depends(verify_key)):
+    """Mint a key. The raw value exists only in this response — only its hash is stored."""
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="Key name is required.")
+
+    raw, prefix, hashed = _generate_api_key()
+    row = ApiKey(
+        name=body.name.strip(),
+        prefix=prefix,
+        key_hash=hashed,
+        project_id=body.project_id or None,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return ApiKeyCreated(**row.model_dump(exclude={"key_hash"}), key=raw)
+
+
+@app.get("/api/keys", response_model=List[ApiKeyPublic])
+def list_api_keys(project_id: Optional[str] = None, session: Session = Depends(get_session)):
+    """List keys. Read-only, so unauthenticated — the response carries no secret."""
+    query = select(ApiKey)
+    if project_id:
+        query = query.where(ApiKey.project_id == project_id)
+    rows = session.exec(query.order_by(ApiKey.created_at.desc())).all()
+    return [ApiKeyPublic(**r.model_dump(exclude={"key_hash"})) for r in rows]
+
+
+@app.delete("/api/keys/{key_id}")
+def delete_api_key(key_id: int, session: Session = Depends(get_session), _=Depends(verify_key)):
+    row = session.get(ApiKey, key_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="API key not found")
+    session.delete(row)
+    session.commit()
+    return {"ok": True}

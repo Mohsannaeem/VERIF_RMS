@@ -48,6 +48,22 @@ def _migrate():
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_run_results_project_id    ON run_results(project_id)"))
         conn.commit()
 
+        # Create api_keys table if missing
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS api_keys (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                name         TEXT NOT NULL,
+                prefix       TEXT NOT NULL,
+                key_hash     TEXT NOT NULL,
+                project_id   TEXT,
+                created_at   TEXT NOT NULL,
+                last_used_at TEXT
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_key_hash   ON api_keys(key_hash)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_project_id ON api_keys(project_id)"))
+        conn.commit()
+
         # Migrate old timestamped test_runs rows into run_results
         rows = conn.execute(text("SELECT * FROM test_runs")).mappings().fetchall()
         for row in rows:
