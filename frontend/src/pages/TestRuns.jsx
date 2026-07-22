@@ -1,9 +1,63 @@
 import { useState, useEffect, useCallback, Fragment } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { Plus, Trash2, ExternalLink, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { Plus, Trash2, ExternalLink, RefreshCw, ChevronDown, ChevronRight, Download } from 'lucide-react';
 import { SCHEDULER_MODES, COLORS, STATUS_COLOR } from '../constants';
-import { Modal, Field, SelectField, ModalFooter } from '../components/ui/Modal.jsx';
+import { Modal, Field, SelectField, ModalFooter, RadioGroup } from '../components/ui/Modal.jsx';
+import { toCSV, downloadCSV, passRate, durationMin, slug } from '../utils/csv';
+import { downloadWorkbook, sheetName } from '../utils/xlsx';
 import { api } from '../api';
+
+// ── Column definitions ────────────────────────────────────────────────────────
+// One source of truth per export shape: the CSV header order and the Excel
+// schema are both derived from these, so the two formats cannot drift apart.
+// `csv` formats a value for the flat text export; Excel keeps the raw number
+// so columns stay sortable, with `format` controlling how it displays.
+const decimal1 = { type: Number, format: '0.0', csv: v => (v == null ? '' : v.toFixed(1)) };
+
+const SUMMARY_FIELDS = [
+  { column: 'Regression ID', type: String, width: 30 },
+  { column: 'Name',          type: String, width: 30 },
+  { column: 'Module',        type: String, width: 18 },
+  { column: 'Scheduler',     type: String, width: 12 },
+  { column: 'Phase',         type: String, width: 8  },
+  { column: 'Component',     type: String, width: 14 },
+  { column: 'Status',        type: String, width: 12 },
+  { column: 'Pass Rate %',   ...decimal1,  width: 12 },
+  { column: 'Passed',        type: Number, width: 9  },
+  { column: 'Failed',        type: Number, width: 9  },
+  { column: 'Total',         type: Number, width: 9  },
+  { column: 'Last Run',      type: String, width: 20 },
+  { column: 'Log Path',      type: String, width: 28 },
+];
+
+const HISTORY_FIELDS = [
+  { column: 'Regression ID',  type: String, width: 30 },
+  { column: 'Module',         type: String, width: 18 },
+  { column: 'Scheduler',      type: String, width: 12 },
+  { column: 'Phase',          type: String, width: 8  },
+  { column: 'Component',      type: String, width: 14 },
+  { column: 'Execution #',    type: Number, width: 12 },
+  { column: 'Status',         type: String, width: 12 },
+  { column: 'Pass Rate %',    ...decimal1,  width: 12 },
+  { column: 'Passed',         type: Number, width: 9  },
+  { column: 'Failed',         type: Number, width: 9  },
+  { column: 'Total',          type: Number, width: 9  },
+  { column: 'Start Time',     type: String, width: 20 },
+  { column: 'End Time',       type: String, width: 20 },
+  { column: 'Duration (min)', ...decimal1,  width: 14 },
+  { column: 'Log Path',       type: String, width: 28 },
+  { column: 'Executed At',    type: String, width: 20 },
+];
+
+const toColumns = fields => fields.map(f => f.column);
+
+/** Apply each field's `csv` formatter, leaving other values untouched. */
+const toCsvRow = (row, fields) => Object.fromEntries(
+  fields.map(f => [f.column, f.csv ? f.csv(row[f.column]) : row[f.column]]),
+);
+
+/** '' / null → undefined, so blank numeric cells stay genuinely empty. */
+const numOrBlank = v => (v === '' || v == null ? undefined : Number(v));
 
 // ── Execution history sub-table ───────────────────────────────────────────────
 function RunResultsRows({ regressionId, formatDt }) {
@@ -90,10 +144,19 @@ function TestRuns() {
   const [expanded, setExpanded] = useState(new Set());
   const [filters, setFilters]   = useState({ id: '', module: '', status: 'all', scheduler: 'all' });
 
+  // regression_id → execution results, oldest first. Feeds the CSV export.
+  const [runResultsMap, setRunResultsMap] = useState({});
+
   const [modalOpen, setModalOpen] = useState(false);
   const [form, setForm]           = useState({});
   const [saving, setSaving]       = useState(false);
   const [formError, setFormError] = useState('');
+
+  const [exportOpen, setExportOpen]     = useState(false);
+  const [exportContent, setExportContent] = useState('summary'); // summary | history
+  const [exportScope, setExportScope]     = useState('view');    // view | all
+  const [exporting, setExporting]         = useState(false);
+  const [exportError, setExportError]     = useState('');
 
   // useCallback — deps use `project` (not `project?.id`) to satisfy memoization rule
   const fetchRuns = useCallback(() => {
@@ -105,10 +168,24 @@ function TestRuns() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
+
+    // Bulk-load execution history once, rather than N requests at export time.
+    api.getAllRunResults({ project_id: project.id, phase, component })
+      .then(raw => {
+        const arr = Array.isArray(raw) ? raw : (raw.value ?? []);
+        const map = {};
+        for (const r of arr) (map[r.regression_id] ??= []).push(r);
+        for (const list of Object.values(map)) {
+          list.sort((a, b) => String(a.end_time || a.executed_at || '').localeCompare(String(b.end_time || b.executed_at || '')));
+        }
+        setRunResultsMap(map);
+      })
+      .catch(() => setRunResultsMap({}));
+
     setLoading(true);
   }, [project, phase, component]);
 
-  useEffect(() => { fetchRuns(); }, [fetchRuns]); // eslint-disable-line react-hooks/set-state-in-effect
+  useEffect(() => { fetchRuns(); }, [fetchRuns]);
 
   const toggleExpand = (id) => setExpanded(prev => {
     const next = new Set(prev);
@@ -161,6 +238,88 @@ function TestRuns() {
     setRuns(prev => prev.filter(r => r.id !== id));
   };
 
+  // ── Export ──────────────────────────────────────────────────────────────────
+  const lastRunOf = (run) => {
+    const results = runResultsMap[run.id];
+    return results?.length ? (results[results.length - 1].end_time ?? run.end_time) : run.end_time;
+  };
+
+  const summaryRow = (run) => ({
+    'Regression ID': run.id,
+    'Name':          run.name || run.id,
+    'Module':        run.module,
+    'Scheduler':     run.scheduler,
+    'Phase':         run.phase,
+    'Component':     run.component,
+    'Status':        run.status,
+    'Pass Rate %':   numOrBlank(passRate(run.passed_tests, run.total_tests)),
+    'Passed':        run.passed_tests,
+    'Failed':        run.failed_tests,
+    'Total':         run.total_tests,
+    'Last Run':      lastRunOf(run),
+    'Log Path':      run.log_path,
+  });
+
+  const historyRow = (run, r, i) => ({
+    'Regression ID':  run.id,
+    'Module':         run.module,
+    'Scheduler':      run.scheduler,
+    'Phase':          run.phase,
+    'Component':      run.component,
+    'Execution #':    i + 1,
+    'Status':         r.status,
+    'Pass Rate %':    numOrBlank(passRate(r.passed_tests, r.total_tests)),
+    'Passed':         r.passed_tests,
+    'Failed':         r.failed_tests,
+    'Total':          r.total_tests,
+    'Start Time':     r.start_time,
+    'End Time':       r.end_time,
+    'Duration (min)': numOrBlank(durationMin(r.start_time, r.end_time)),
+    'Log Path':       r.log_path,
+    'Executed At':    r.executed_at,
+  });
+
+  const exportFilename = (kind, ext) => {
+    // Local date, not toISOString() — UTC would stamp yesterday for east-of-UTC users.
+    const d = new Date();
+    const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return `rms_${slug(project.id)}_${slug(phase)}_${slug(component)}_${kind}_${today}.${ext}`;
+  };
+
+  const handleExport = async () => {
+    const source = exportScope === 'view' ? filteredRuns : runs;
+
+    // Summary only → a single flat table, so CSV.
+    if (exportContent !== 'history') {
+      const rows = source.map(run => toCsvRow(summaryRow(run), SUMMARY_FIELDS));
+      downloadCSV(toCSV(rows, toColumns(SUMMARY_FIELDS)), exportFilename('summary', 'csv'));
+      setExportOpen(false);
+      return;
+    }
+
+    // Summary + history → a workbook: summary tab, then one tab per regression.
+    // A regression with no executions still gets its tab, headers only.
+    setExporting(true);
+    setExportError('');
+    try {
+      const used = new Set();
+      const sheets = [
+        { name: sheetName('Summary', used), rows: source.map(summaryRow), fields: SUMMARY_FIELDS },
+        ...source.map(run => ({
+          name:   sheetName(run.name || run.id, used),
+          rows:   (runResultsMap[run.id] ?? []).map((r, i) => historyRow(run, r, i)),
+          fields: HISTORY_FIELDS,
+        })),
+      ];
+      await downloadWorkbook(sheets, exportFilename('history', 'xlsx'));
+      setExportOpen(false);
+    } catch (e) {
+      setExportError(e.message || 'Failed to build the workbook.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const formatDt = (str) => {
     if (!str) return '—';
     const d = new Date(str);
@@ -181,6 +340,9 @@ function TestRuns() {
           <div style={{ display: 'flex', gap: '8px' }}>
             <button className="btn btn-secondary" style={{ padding: '7px 12px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }} onClick={fetchRuns} disabled={loading}>
               <RefreshCw size={14} style={{ animation: loading ? 'spin 1s linear infinite' : 'none' }} /> Refresh
+            </button>
+            <button className="btn btn-secondary" style={{ padding: '7px 12px', display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }} onClick={() => setExportOpen(true)}>
+              <Download size={14} /> Export
             </button>
             <button className="btn btn-primary" style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }} onClick={openCreate}>
               <Plus size={15} /> Create Regression
@@ -302,6 +464,37 @@ function TestRuns() {
             Status will be <strong style={{ color: COLORS.muted }}>Scheduled</strong>. Push results later via the script.
           </div>
           <ModalFooter error={formError} saving={saving} onCancel={closeModal} onSave={handleCreate} saveLabel="Create Regression" />
+        </Modal>
+      )}
+
+      {exportOpen && (
+        <Modal title="Export" onClose={() => setExportOpen(false)}>
+          <RadioGroup
+            label="What do you want to export?"
+            value={exportContent}
+            onChange={setExportContent}
+            options={[
+              { value: 'summary', title: 'Summary only  ·  CSV',                hint: 'One row per regression with its latest result.' },
+              { value: 'history', title: 'Summary + Execution History  ·  Excel', hint: 'A workbook with a summary tab, then one tab per regression holding its executions.' },
+            ]}
+          />
+          <RadioGroup
+            label="Which regressions to include?"
+            value={exportScope}
+            onChange={setExportScope}
+            options={[
+              { value: 'view', title: 'Current view',    hint: `Applies the active filters — ${filteredRuns.length} of ${runs.length} regressions.` },
+              { value: 'all',  title: 'All regressions', hint: `Ignores all filters — all ${runs.length} regressions for this phase / component.` },
+            ]}
+          />
+          <ModalFooter
+            error={exportError}
+            saving={exporting}
+            busyLabel="Building…"
+            onCancel={() => setExportOpen(false)}
+            onSave={handleExport}
+            saveLabel={exportContent === 'history' ? 'Download Excel' : 'Download CSV'}
+          />
         </Modal>
       )}
     </div>
