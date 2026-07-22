@@ -64,6 +64,21 @@ def _migrate():
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_api_keys_project_id ON api_keys(project_id)"))
         conn.commit()
 
+        # Ownership columns, added separately: CREATE TABLE IF NOT EXISTS is a
+        # no-op on installs that already have the first-cut api_keys table.
+        for column, ddl in [
+            ("owner_name",  "owner_name TEXT NOT NULL DEFAULT ''"),
+            ("owner_email", "owner_email TEXT NOT NULL DEFAULT ''"),
+            ("team",        "team TEXT"),
+            ("purpose",     "purpose TEXT"),
+            ("expires_at",  "expires_at TEXT"),
+        ]:
+            try:
+                conn.execute(text(f"ALTER TABLE api_keys ADD COLUMN {ddl}"))
+                conn.commit()
+            except Exception:
+                pass   # already present
+
         # Migrate old timestamped test_runs rows into run_results
         rows = conn.execute(text("SELECT * FROM test_runs")).mappings().fetchall()
         for row in rows:

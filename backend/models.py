@@ -83,11 +83,12 @@ class Schedule(SQLModel, table=True):
 
 
 class ApiKey(SQLModel, table=True):
-    """A named, individually revocable API key.
+    """A named, individually revocable API key with an ownership record.
 
     Only the SHA-256 hash of the key is stored — the raw value is returned once
     at creation and is unrecoverable afterwards. `prefix` exists so the UI can
-    identify a key without holding anything sensitive.
+    identify a key without holding anything sensitive. The owner fields exist so
+    a leaked or stale key can be traced to a person without guesswork.
     """
     __tablename__ = "api_keys"
 
@@ -96,6 +97,13 @@ class ApiKey(SQLModel, table=True):
     prefix: str                               # first 12 chars of the raw key, for display
     key_hash: str = Field(index=True)         # SHA-256(raw_key) — never store the raw key
     project_id: Optional[str] = Field(default=None, index=True)   # None = global key
+
+    owner_name: str = ""                      # who is accountable for this key
+    owner_email: str = ""                     # how to reach them
+    team: Optional[str] = None
+    purpose: Optional[str] = None             # what it is used for
+    expires_at: Optional[str] = None          # YYYY-MM-DD; refused on/after this date
+
     created_at: str = Field(default_factory=_now_utc)
     last_used_at: Optional[str] = None
 

@@ -37,11 +37,24 @@ def _hash_key(raw: str) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()
 
 
+def _today() -> str:
+    """Today in UTC as YYYY-MM-DD, comparable against ApiKey.expires_at."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_DATE_RE  = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
 async def verify_key(
     key: Optional[str] = Security(_api_key_header),
     session: Session = Depends(get_session),
 ):
-    """Authenticate a write request against the env var, then the api_keys table.
+    """Authenticate machine ingest against the env var, then the api_keys table.
+
+    Applied only to the endpoints CI calls — publishing results and coverage.
+    Everything the GUI touches is deliberately left unauthenticated, so creating
+    a key never locks a browser out of its own Settings page.
 
     Open mode: when neither RMS_API_KEY nor any stored key exists, auth is
     skipped entirely, preserving the behaviour of a fresh install.
@@ -58,6 +71,13 @@ async def verify_key(
     row = session.exec(select(ApiKey).where(ApiKey.key_hash == _hash_key(key or ""))).first()
     if not row:
         raise HTTPException(status_code=403, detail="Invalid or missing X-API-Key header.")
+
+    # Expiry is a date; the key stops working at the start of that day.
+    if row.expires_at and _today() >= row.expires_at:
+        raise HTTPException(
+            status_code=403,
+            detail=f"API key '{row.name}' expired on {row.expires_at}.",
+        )
 
     row.last_used_at = _now_utc()
     session.add(row)
@@ -118,7 +138,7 @@ def get_projects(session: Session = Depends(get_session)):
 
 
 @app.post("/api/projects", response_model=Project)
-def create_project(body: ProjectRequest, session: Session = Depends(get_session), _=Depends(verify_key)):
+def create_project(body: ProjectRequest, session: Session = Depends(get_session)):
     existing = session.get(Project, body.id)
     phases_json     = _to_json_array(body.phases)
     components_json = _to_json_array(body.components)
@@ -277,7 +297,7 @@ def get_run_results(run_id: str, session: Session = Depends(get_session)):
     ).all()
 
 @app.post("/api/runs", response_model=TestRun, status_code=201)
-def create_run(run: TestRun, session: Session = Depends(get_session), _=Depends(verify_key)):
+def create_run(run: TestRun, session: Session = Depends(get_session)):
     if session.get(TestRun, run.id):
         raise HTTPException(status_code=409, detail=f"Run '{run.id}' already exists. Use PATCH /api/runs/{{run_id}} to update.")
     if not run.name:
@@ -288,7 +308,7 @@ def create_run(run: TestRun, session: Session = Depends(get_session), _=Depends(
     return run
 
 @app.patch("/api/runs/{run_id}", response_model=TestRun)
-def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depends(get_session), _=Depends(verify_key)):
+def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depends(get_session)):
     run = session.get(TestRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found. Create it first via POST /api/runs.")
@@ -300,7 +320,7 @@ def update_run(run_id: str, updates: RunResultsUpdate, session: Session = Depend
     return run
 
 @app.delete("/api/runs/{run_id}")
-def delete_run(run_id: str, session: Session = Depends(get_session), _=Depends(verify_key)):
+def delete_run(run_id: str, session: Session = Depends(get_session)):
     run = session.get(TestRun, run_id)
     if not run:
         raise HTTPException(status_code=404, detail="Run not found")
@@ -591,14 +611,14 @@ def get_schedules(
     return session.exec(query).all()
 
 @app.post("/api/schedules", response_model=Schedule)
-def create_schedule(schedule: Schedule, session: Session = Depends(get_session), _=Depends(verify_key)):
+def create_schedule(schedule: Schedule, session: Session = Depends(get_session)):
     session.add(schedule)
     session.commit()
     session.refresh(schedule)
     return schedule
 
 @app.delete("/api/schedules/{schedule_id}")
-def delete_schedule(schedule_id: int, session: Session = Depends(get_session), _=Depends(verify_key)):
+def delete_schedule(schedule_id: int, session: Session = Depends(get_session)):
     s = session.get(Schedule, schedule_id)
     if not s:
         raise HTTPException(status_code=404, detail="Schedule not found")
@@ -621,7 +641,7 @@ def get_settings(project_id: str, session: Session = Depends(get_session)):
     return result
 
 @app.post("/api/settings", response_model=IntegrationSettings)
-def save_settings(settings: IntegrationSettings, session: Session = Depends(get_session), _=Depends(verify_key)):
+def save_settings(settings: IntegrationSettings, session: Session = Depends(get_session)):
     existing = session.exec(
         select(IntegrationSettings).where(IntegrationSettings.project_id == settings.project_id)
     ).first()
@@ -647,6 +667,11 @@ def save_settings(settings: IntegrationSettings, session: Session = Depends(get_
 
 class ApiKeyRequest(SQLModel):
     name: str
+    owner_name: str
+    owner_email: str
+    team: Optional[str] = None
+    purpose: Optional[str] = None
+    expires_at: Optional[str] = None          # YYYY-MM-DD
     project_id: Optional[str] = None
 
 
@@ -656,6 +681,11 @@ class ApiKeyPublic(SQLModel):
     name: str
     prefix: str
     project_id: Optional[str] = None
+    owner_name: str = ""
+    owner_email: str = ""
+    team: Optional[str] = None
+    purpose: Optional[str] = None
+    expires_at: Optional[str] = None
     created_at: str
     last_used_at: Optional[str] = None
 
@@ -666,10 +696,21 @@ class ApiKeyCreated(ApiKeyPublic):
 
 
 @app.post("/api/keys", response_model=ApiKeyCreated, status_code=201)
-def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session), _=Depends(verify_key)):
+def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session)):
     """Mint a key. The raw value exists only in this response — only its hash is stored."""
     if not body.name.strip():
         raise HTTPException(status_code=422, detail="Key name is required.")
+    if not body.owner_name.strip():
+        raise HTTPException(status_code=422, detail="Owner name is required.")
+    if not _EMAIL_RE.match(body.owner_email.strip()):
+        raise HTTPException(status_code=422, detail="A valid owner email is required.")
+
+    expires = (body.expires_at or "").strip() or None
+    if expires:
+        if not _DATE_RE.match(expires):
+            raise HTTPException(status_code=422, detail="Expiry must be a date in YYYY-MM-DD form.")
+        if expires <= _today():
+            raise HTTPException(status_code=422, detail="Expiry must be a future date.")
 
     raw, prefix, hashed = _generate_api_key()
     row = ApiKey(
@@ -677,6 +718,11 @@ def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session),
         prefix=prefix,
         key_hash=hashed,
         project_id=body.project_id or None,
+        owner_name=body.owner_name.strip(),
+        owner_email=body.owner_email.strip(),
+        team=(body.team or "").strip() or None,
+        purpose=(body.purpose or "").strip() or None,
+        expires_at=expires,
     )
     session.add(row)
     session.commit()
@@ -695,7 +741,7 @@ def list_api_keys(project_id: Optional[str] = None, session: Session = Depends(g
 
 
 @app.delete("/api/keys/{key_id}")
-def delete_api_key(key_id: int, session: Session = Depends(get_session), _=Depends(verify_key)):
+def delete_api_key(key_id: int, session: Session = Depends(get_session)):
     row = session.get(ApiKey, key_id)
     if not row:
         raise HTTPException(status_code=404, detail="API key not found")
