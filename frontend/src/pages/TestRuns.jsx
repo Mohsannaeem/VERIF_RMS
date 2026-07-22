@@ -135,10 +135,46 @@ function SortHeader({ col, label, sort, onSort, style }) {
 }
 
 // ── Execution history sub-table ───────────────────────────────────────────────
+/** Sort keys for one execution row. `null` column means chronological order. */
+function historySortValue(col, r) {
+  switch (col) {
+    case 'exec':      return r.id;
+    case 'status':    return STATUS_RANK[r.status] ?? 99;
+    case 'pass_rate': return r.total_tests ? r.passed_tests / r.total_tests : -1;
+    case 'failed':    return r.failed_tests ?? 0;
+    case 'start':     return r.start_time || '';
+    case 'duration':  return Number(durationMin(r.start_time, r.end_time)) || -1;
+    default:          return 0;
+  }
+}
+
+const HISTORY_SORTABLE = {
+  exec:      '#',
+  status:    'Status',
+  pass_rate: 'Pass Rate',
+  failed:    'Failed',
+  start:     'Start Time',
+  duration:  'Duration',
+};
+
+const subHead = {
+  padding: '6px 12px', fontSize: '0.68rem', fontWeight: 700, letterSpacing: '0.06em',
+  textTransform: 'uppercase', color: 'var(--text-muted)',
+  borderBottom: '1px solid var(--border-color)', whiteSpace: 'nowrap',
+};
+
 function RunResultsRows({ regressionId, formatDt }) {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit]     = useState(10);
+  // null column = the chronological order the API returns.
+  const [hsort, setHsort]     = useState({ col: null, dir: 'asc' });
+
+  const sortHistory = (col) => setHsort(prev => {
+    if (prev.col !== col)   return { col, dir: 'asc' };
+    if (prev.dir === 'asc') return { col, dir: 'desc' };
+    return { col: null, dir: 'asc' };
+  });
 
   useEffect(() => {
     api.getRunResults(regressionId)
@@ -158,7 +194,17 @@ function RunResultsRows({ regressionId, formatDt }) {
     </tr>
   );
 
-  const visible = limit === 'all' ? results : results.slice(-limit);
+  // Window by recency first — "Last 10" must stay chronological — then order
+  // that window for display, so sorting never changes *which* runs are shown.
+  const windowed = limit === 'all' ? results : results.slice(-limit);
+  const visible  = hsort.col
+    ? [...windowed].sort((a, b) => {
+        const av = historySortValue(hsort.col, a);
+        const bv = historySortValue(hsort.col, b);
+        const f  = hsort.dir === 'asc' ? 1 : -1;
+        return av < bv ? -f : av > bv ? f : a.id - b.id;
+      })
+    : windowed;
 
   return (
     <>
@@ -182,32 +228,60 @@ function RunResultsRows({ regressionId, formatDt }) {
           </div>
         </td>
       </tr>
-      {visible.map(r => (
-        <tr key={r.id} style={{ background: 'rgba(88,166,255,0.03)', borderLeft: '3px solid var(--accent-glow)' }}>
-          <td style={{ paddingLeft: '48px', fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-muted)' }}>#{r.id}</td>
-          <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{r.scheduler}</td>
-          <td>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS_COLOR[r.status] ?? COLORS.muted, display: 'inline-block' }} />
-              <span style={{ textTransform: 'capitalize', fontSize: '0.82rem' }}>{r.status}</span>
-            </div>
-          </td>
-          <td style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{r.total_tests || '—'}</td>
-          <td style={{ textAlign: 'center', color: COLORS.passed, fontWeight: 600, fontSize: '0.85rem' }}>{r.passed_tests || '—'}</td>
-          <td style={{ textAlign: 'center', color: COLORS.failed, fontWeight: 600, fontSize: '0.85rem' }}>{r.failed_tests || '—'}</td>
-          <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-            <div>{formatDt(r.start_time)}</div>
-            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>logged {formatDt(r.executed_at)}</div>
-          </td>
-          <td style={{ textAlign: 'right' }}>
-            {r.log_path && (
-              <button className="btn btn-secondary" style={{ padding: '4px' }} title="View Log" onClick={() => window.open(r.log_path, '_blank')}>
-                <ExternalLink size={13} />
-              </button>
-            )}
-          </td>
-        </tr>
-      ))}
+
+      {/* Column header for the history, so the sub-table is readable on its own. */}
+      <tr style={{ background: 'var(--bg-color-tertiary)' }}>
+        <td style={{ ...subHead, paddingLeft: '48px' }}>
+          <SortHeader col="exec" label={HISTORY_SORTABLE.exec} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={subHead}>Scheduler</td>
+        <td style={subHead}>
+          <SortHeader col="status" label={HISTORY_SORTABLE.status} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={subHead}>
+          <SortHeader col="pass_rate" label={HISTORY_SORTABLE.pass_rate} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={subHead}>
+          <SortHeader col="failed" label={HISTORY_SORTABLE.failed} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={subHead}>
+          <SortHeader col="start" label={HISTORY_SORTABLE.start} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={subHead}>
+          <SortHeader col="duration" label={HISTORY_SORTABLE.duration} sort={hsort} onSort={sortHistory} />
+        </td>
+        <td style={{ ...subHead, textAlign: 'right' }}>Log</td>
+      </tr>
+
+      {visible.map(r => {
+        const mins = durationMin(r.start_time, r.end_time);
+        return (
+          <tr key={r.id} style={{ background: 'rgba(88,166,255,0.03)', borderLeft: '3px solid var(--accent-glow)' }}>
+            <td style={{ paddingLeft: '48px', fontFamily: 'monospace', fontSize: '0.78rem', color: 'var(--text-muted)' }}>#{r.id}</td>
+            <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{r.scheduler}</td>
+            <td>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ width: 7, height: 7, borderRadius: '50%', background: STATUS_COLOR[r.status] ?? COLORS.muted, display: 'inline-block' }} />
+                <span style={{ textTransform: 'capitalize', fontSize: '0.82rem' }}>{r.status}</span>
+              </div>
+            </td>
+            <td><PassRateCell passed={r.passed_tests} total={r.total_tests} /></td>
+            <td style={{ color: COLORS.failed, fontWeight: 600, fontSize: '0.85rem' }}>{r.failed_tests || '—'}</td>
+            <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+              <div>{formatDt(r.start_time)}</div>
+              <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>logged {formatDt(r.executed_at)}</div>
+            </td>
+            <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{mins === '' ? '—' : `${mins} min`}</td>
+            <td style={{ textAlign: 'right' }}>
+              {r.log_path && (
+                <button className="btn btn-secondary" style={{ padding: '4px' }} title="View Log" onClick={() => window.open(r.log_path, '_blank')}>
+                  <ExternalLink size={13} />
+                </button>
+              )}
+            </td>
+          </tr>
+        );
+      })}
     </>
   );
 }
