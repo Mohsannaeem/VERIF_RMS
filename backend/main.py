@@ -190,13 +190,18 @@ def get_all_run_results(
     component: Optional[str] = None,
     session: Session = Depends(get_session),
 ):
-    """Bulk-fetch all run_results for a project/phase/component — avoids N+1 per regression."""
+    """Bulk fetch all execution results for a project/phase/component in one request.
+    Replaces the N+1 pattern of fetching per-regression results individually.
+
+    Must stay declared above /api/runs/{run_id}, which would otherwise match this
+    path with run_id="results". Ordered by end_time (the actual test date) to match
+    /api/runs/{run_id}/results."""
     query = select(RunResult).where(RunResult.project_id == project_id)
     if phase:
         query = query.where(RunResult.phase == phase)
     if component and component != "All Components":
         query = query.where(RunResult.component == component)
-    return session.exec(query.order_by(RunResult.executed_at)).all()
+    return session.exec(query.order_by(RunResult.end_time)).all()
 
 
 @app.get("/api/runs", response_model=List[TestRun])
@@ -234,26 +239,6 @@ def get_run_results(run_id: str, session: Session = Depends(get_session)):
         .where(RunResult.regression_id == run_id)
         .order_by(RunResult.end_time)
     ).all()
-
-@app.get("/api/runs/results", response_model=List[RunResult])
-def get_all_run_results(
-    project_id: str,
-    phase: Optional[str] = None,
-    component: Optional[str] = None,
-    session: Session = Depends(get_session),
-):
-    """Bulk fetch all execution results for a project/phase/component in one request.
-    Replaces the N+1 pattern of fetching per-regression results individually."""
-    query = (
-        select(RunResult)
-        .where(RunResult.project_id == project_id)
-    )
-    if phase:
-        query = query.where(RunResult.phase == phase)
-    if component and component != "All Components":
-        query = query.where(RunResult.component == component)
-    query = query.order_by(RunResult.end_time)
-    return session.exec(query).all()
 
 @app.post("/api/runs", response_model=TestRun, status_code=201)
 def create_run(run: TestRun, session: Session = Depends(get_session), _=Depends(verify_key)):
