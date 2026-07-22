@@ -7,6 +7,8 @@ export default BASE;
 // Internal helper
 // ---------------------------------------------------------------------------
 async function request(path, options = {}) {
+  // No API key is sent: the GUI's endpoints are unauthenticated by design.
+  // Keys exist for CI ingest only (POST /api/runs/result, /api/coverage).
   const res = await fetch(`${BASE}${path}`, {
     headers: { 'Content-Type': 'application/json', ...options.headers },
     ...options,
@@ -80,6 +82,17 @@ export const api = {
 
   deleteSchedule: (id) =>
     request(`/api/schedules/${id}`, { method: 'DELETE' }),
+
+  // API keys
+  getApiKeys: (params) =>
+    request(`/api/keys${params ? `?${new URLSearchParams(params)}` : ''}`),
+
+  /** Returns the raw key in `key` — the only time it is ever available. */
+  createApiKey: (body) =>
+    request('/api/keys', { method: 'POST', body: JSON.stringify(body) }),
+
+  deleteApiKey: (id) =>
+    request(`/api/keys/${id}`, { method: 'DELETE' }),
 
   // Settings
   getSettings: (projectId) =>

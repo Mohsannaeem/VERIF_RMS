@@ -1,5 +1,6 @@
 import React from 'react';
 import { Mail, MessageSquare, Webhook, Key } from 'lucide-react';
+import ApiKeysCard from '../components/ApiKeysCard.jsx';
 
 function Settings() {
   const saveSettings = (e) => {
@@ -8,6 +9,7 @@ function Settings() {
   };
 
   return (
+    <>
     <div className="card" style={{ maxWidth: '800px', margin: '0 auto' }}>
       <div className="card-header">
         <h3 className="card-title">Integrations & External Tools</h3>
@@ -73,6 +75,9 @@ function Settings() {
         </div>
       </form>
     </div>
+
+    <ApiKeysCard />
+    </>
   );
 }
 

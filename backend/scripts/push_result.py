@@ -16,9 +16,11 @@ Optional:
   --start  Start time ISO string  (default: server sets to now)
   --end    End time ISO string    (default: server sets to now)
   --log    Path to regression log (default: none)
+  --key    API key                (default: $RMS_API_KEY)
 """
 
 import argparse
+import os
 import sys
 import requests
 
@@ -33,6 +35,8 @@ def parse_args():
     p.add_argument("--start",  default=None,   help="Start time (ISO)")
     p.add_argument("--end",    default=None,   help="End time (ISO)")
     p.add_argument("--log",    default=None,   help="Log file path")
+    p.add_argument("--key",    default=os.environ.get("RMS_API_KEY", ""),
+                   help="API key for authenticating result submission (default: $RMS_API_KEY)")
     return p.parse_args()
 
 
@@ -53,9 +57,11 @@ def main():
     if args.end:   payload["end_time"]   = args.end
     if args.log:   payload["log_path"]   = args.log
 
+    headers = {"X-API-Key": args.key} if args.key else {}
+
     print(f"Pushing result for regression '{args.id}' ...")
     try:
-        r = requests.post(f"{args.url}/api/runs/result", json=payload, timeout=10)
+        r = requests.post(f"{args.url}/api/runs/result", json=payload, headers=headers, timeout=10)
     except requests.ConnectionError:
         print(f"ERROR: Could not connect to {args.url}. Is the backend running?")
         sys.exit(1)
@@ -72,6 +78,9 @@ def main():
         print(f"  Executed at: {data['executed_at']}")
     elif r.status_code == 404:
         print(f"ERROR: {r.json().get('detail', r.text)}")
+        sys.exit(1)
+    elif r.status_code == 403:
+        print("ERROR: Rejected by the server (403). Pass a valid key via --key or $RMS_API_KEY.")
         sys.exit(1)
     else:
         print(f"ERROR {r.status_code}: {r.text}")
