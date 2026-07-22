@@ -1,6 +1,7 @@
-import { useState, useEffect, useCallback, Fragment } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useOutletContext } from 'react-router-dom';
-import { Plus, Trash2, ExternalLink, RefreshCw, ChevronDown, ChevronRight, Download } from 'lucide-react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import { Plus, Trash2, ExternalLink, RefreshCw, ChevronDown, ChevronRight, Download, ChevronsUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { SCHEDULER_MODES, COLORS, STATUS_COLOR } from '../constants';
 import { Modal, Field, SelectField, ModalFooter, RadioGroup } from '../components/ui/Modal.jsx';
 import { toCSV, downloadCSV, passRate, durationMin, slug } from '../utils/csv';
@@ -59,6 +60,80 @@ const toCsvRow = (row, fields) => Object.fromEntries(
 /** '' / null → undefined, so blank numeric cells stay genuinely empty. */
 const numOrBlank = v => (v === '' || v == null ? undefined : Number(v));
 
+// ── Sorting ───────────────────────────────────────────────────────────────────
+const DEFAULT_SORT = { col: 'last_run', dir: 'desc' };
+
+/** Triage order: what needs attention first. */
+const STATUS_RANK = { running: 0, failed: 1, scheduled: 2, passed: 3 };
+
+const SORTABLE = {
+  pass_rate: 'Pass Rate',
+  status:    'Status',
+  last_run:  'Last Run',
+  module:    'Module',
+  scheduler: 'Scheduler',
+};
+
+/** Numeric or string key for a run under the given column. */
+function sortValue(col, run, lastRunOf) {
+  switch (col) {
+    // total === 0 has no meaningful rate; -1 sinks it below every real value.
+    case 'pass_rate': return run.total_tests ? run.passed_tests / run.total_tests : -1;
+    case 'status':    return STATUS_RANK[run.status] ?? 99;
+    case 'last_run':  return lastRunOf(run) || '';
+    case 'module':    return (run.module    || '').toLowerCase();
+    case 'scheduler': return (run.scheduler || '').toLowerCase();
+    default:          return '';
+  }
+}
+
+/** Bar + percentage colour, by triage severity. */
+function rateColor(rate) {
+  if (rate >= 90) return 'var(--success-color)';
+  if (rate >= 75) return 'var(--warning-color)';
+  return 'var(--error-color)';
+}
+
+/** `passed / total` over a thin filled bar, with the percentage alongside. */
+function PassRateCell({ passed, total }) {
+  if (!total) return <span style={{ color: 'var(--text-muted)' }}>—</span>;
+
+  const pct   = (passed / total) * 100;
+  const color = rateColor(pct);
+
+  return (
+    <div style={{ minWidth: '110px' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: '8px', marginBottom: '4px' }}>
+        <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>{passed} / {total}</span>
+        <span style={{ fontSize: '0.8rem', fontWeight: 700, color }}>{pct.toFixed(1)}%</span>
+      </div>
+      <div
+        style={{ height: '4px', borderRadius: '2px', background: 'var(--bg-color-tertiary)', overflow: 'hidden' }}
+        role="progressbar" aria-valuenow={Number(pct.toFixed(1))} aria-valuemin={0} aria-valuemax={100}
+      >
+        <div style={{ width: `${Math.min(100, Math.max(0, pct))}%`, height: '100%', background: color, borderRadius: '2px' }} />
+      </div>
+    </div>
+  );
+}
+
+/** Sortable column header — click cycles ascending → descending → default. */
+function SortHeader({ col, label, sort, onSort, style }) {
+  const active = sort.col === col;
+  const Icon   = !active ? ChevronsUpDown : (sort.dir === 'asc' ? ArrowUp : ArrowDown);
+  return (
+    <div
+      onClick={() => onSort(col)}
+      title={`Sort by ${label}`}
+      style={{ display: 'flex', alignItems: 'center', gap: '4px', cursor: 'pointer', userSelect: 'none',
+               color: active ? 'var(--accent-color)' : undefined, ...style }}
+    >
+      {label}
+      <Icon size={13} style={{ opacity: active ? 1 : 0.45, flexShrink: 0 }} />
+    </div>
+  );
+}
+
 // ── Execution history sub-table ───────────────────────────────────────────────
 function RunResultsRows({ regressionId, formatDt }) {
   const [results, setResults] = useState([]);
@@ -73,13 +148,13 @@ function RunResultsRows({ regressionId, formatDt }) {
 
   if (loading) return (
     <tr>
-      <td colSpan="10" style={{ padding: '12px 48px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>Loading history…</td>
+      <td colSpan="8" style={{ padding: '12px 48px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>Loading history…</td>
     </tr>
   );
 
   if (results.length === 0) return (
     <tr>
-      <td colSpan="10" style={{ padding: '12px 48px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>No execution results yet — push results via the script.</td>
+      <td colSpan="8" style={{ padding: '12px 48px', color: 'var(--text-muted)', fontSize: '0.8rem' }}>No execution results yet — push results via the script.</td>
     </tr>
   );
 
@@ -88,7 +163,7 @@ function RunResultsRows({ regressionId, formatDt }) {
   return (
     <>
       <tr style={{ background: 'var(--bg-color-tertiary)' }}>
-        <td colSpan="10" style={{ padding: '6px 48px' }}>
+        <td colSpan="8" style={{ padding: '6px 48px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
               Showing {visible.length} of {results.length} executions
@@ -120,8 +195,10 @@ function RunResultsRows({ regressionId, formatDt }) {
           <td style={{ textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>{r.total_tests || '—'}</td>
           <td style={{ textAlign: 'center', color: COLORS.passed, fontWeight: 600, fontSize: '0.85rem' }}>{r.passed_tests || '—'}</td>
           <td style={{ textAlign: 'center', color: COLORS.failed, fontWeight: 600, fontSize: '0.85rem' }}>{r.failed_tests || '—'}</td>
-          <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{formatDt(r.start_time)}</td>
-          <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>{formatDt(r.executed_at)}</td>
+          <td style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
+            <div>{formatDt(r.start_time)}</div>
+            <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>logged {formatDt(r.executed_at)}</div>
+          </td>
           <td style={{ textAlign: 'right' }}>
             {r.log_path && (
               <button className="btn btn-secondary" style={{ padding: '4px' }} title="View Log" onClick={() => window.open(r.log_path, '_blank')}>
@@ -143,6 +220,7 @@ function TestRuns() {
   const [loading, setLoading]   = useState(false);
   const [expanded, setExpanded] = useState(new Set());
   const [filters, setFilters]   = useState({ id: '', module: '', status: 'all', scheduler: 'all' });
+  const [sort, setSort]         = useState(DEFAULT_SORT);
 
   // regression_id → execution results, oldest first. Feeds the CSV export.
   const [runResultsMap, setRunResultsMap] = useState({});
@@ -195,6 +273,12 @@ function TestRuns() {
 
   const schedulerOptions = [...new Set(runs.map(r => r.scheduler).filter(Boolean))];
 
+  /** Most recent execution's end_time, falling back to the run's own. */
+  const lastRunOf = useCallback((run) => {
+    const results = runResultsMap[run.id];
+    return results?.length ? (results[results.length - 1].end_time ?? run.end_time) : run.end_time;
+  }, [runResultsMap]);
+
   const filteredRuns = runs.filter(run => {
     if (filters.id        && !(run.name || run.id).toLowerCase().includes(filters.id.toLowerCase())) return false;
     if (filters.module    && !run.module.toLowerCase().includes(filters.module.toLowerCase())) return false;
@@ -202,6 +286,51 @@ function TestRuns() {
     if (filters.scheduler !== 'all' && run.scheduler !== filters.scheduler) return false;
     return true;
   });
+
+  // Filters first, then sort — the order the export also relies on.
+  const sortedRuns = useMemo(() => {
+    if (!sort.col) return filteredRuns;
+    const factor = sort.dir === 'asc' ? 1 : -1;
+    return [...filteredRuns].sort((a, b) => {
+      const av = sortValue(sort.col, a, lastRunOf);
+      const bv = sortValue(sort.col, b, lastRunOf);
+      if (av < bv) return -1 * factor;
+      if (av > bv) return  1 * factor;
+      // Stable tie-break so equal keys never reshuffle between renders.
+      return (a.name || a.id).localeCompare(b.name || b.id);
+    });
+    // filteredRuns is rebuilt each render; these inputs define it.
+  }, [runs, filters, sort, lastRunOf]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  /** Cycle a column: ascending → descending → back to the default sort. */
+  const handleSort = (col) => setSort(prev => {
+    if (prev.col !== col)     return { col, dir: 'asc' };
+    if (prev.dir === 'asc')   return { col, dir: 'desc' };
+    return DEFAULT_SORT;
+  });
+
+  // ── Virtual scroll ──────────────────────────────────────────────────────────
+  // One virtual item per regression. Each renders as its own <tbody> holding the
+  // main row plus, when open, its execution history — so a variable-height group
+  // is still a single measurable element.
+  const scrollRef = useRef(null);
+
+  const rowVirtualizer = useVirtualizer({
+    count: sortedRuns.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 56,          // collapsed row; open rows are measured
+    overscan: 8,
+    getItemKey: (index) => sortedRuns[index]?.id ?? index,
+  });
+
+  // Re-measure when a row opens or closes, so rows below shift by the real height.
+  useEffect(() => { rowVirtualizer.measure(); }, [expanded, rowVirtualizer]);
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+  const padTop      = virtualRows.length ? virtualRows[0].start : 0;
+  const padBottom   = virtualRows.length
+    ? rowVirtualizer.getTotalSize() - virtualRows[virtualRows.length - 1].end
+    : 0;
 
   const openCreate = () => {
     setFormError('');
@@ -239,11 +368,6 @@ function TestRuns() {
   };
 
   // ── Export ──────────────────────────────────────────────────────────────────
-  const lastRunOf = (run) => {
-    const results = runResultsMap[run.id];
-    return results?.length ? (results[results.length - 1].end_time ?? run.end_time) : run.end_time;
-  };
-
   const summaryRow = (run) => ({
     'Regression ID': run.id,
     'Name':          run.name || run.id,
@@ -287,7 +411,8 @@ function TestRuns() {
   };
 
   const handleExport = async () => {
-    const source = exportScope === 'view' ? filteredRuns : runs;
+    // "Current view" means exactly what is on screen: filtered *and* sorted.
+    const source = exportScope === 'view' ? sortedRuns : runs;
 
     // Summary only → a single flat table, so CSV.
     if (exportContent !== 'history') {
@@ -350,7 +475,9 @@ function TestRuns() {
           </div>
         </div>
 
-        <div className="table-container">
+        {/* Fixed-height own scroller: the virtualiser needs a stable viewport,
+            and a self-contained one avoids fighting the page's scroll. */}
+        <div ref={scrollRef} className="table-container" style={{ maxHeight: '65vh', overflowY: 'auto' }}>
           <table className="data-table">
             <thead>
               <tr>
@@ -360,11 +487,11 @@ function TestRuns() {
                   <input type="text" className="form-control" style={{ padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} placeholder="Filter…" value={filters.id} onChange={e => setFilters(f => ({ ...f, id: e.target.value }))} />
                 </th>
                 <th style={{ minWidth: '180px', verticalAlign: 'top' }}>
-                  <div style={{ marginBottom: '8px' }}>Module</div>
+                  <SortHeader col="module" label={SORTABLE.module} sort={sort} onSort={handleSort} style={{ marginBottom: '8px' }} />
                   <input type="text" className="form-control" style={{ padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} placeholder="Filter…" value={filters.module} onChange={e => setFilters(f => ({ ...f, module: e.target.value }))} />
                 </th>
                 <th style={{ minWidth: '130px', verticalAlign: 'top' }}>
-                  <div style={{ marginBottom: '8px' }}>Status</div>
+                  <SortHeader col="status" label={SORTABLE.status} sort={sort} onSort={handleSort} style={{ marginBottom: '8px' }} />
                   <select className="form-control" style={{ padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} value={filters.status} onChange={e => setFilters(f => ({ ...f, status: e.target.value }))}>
                     <option value="all">All</option>
                     <option value="scheduled">Scheduled</option>
@@ -374,68 +501,80 @@ function TestRuns() {
                   </select>
                 </th>
                 <th style={{ minWidth: '110px', verticalAlign: 'top' }}>
-                  <div style={{ marginBottom: '8px' }}>Scheduler</div>
+                  <SortHeader col="scheduler" label={SORTABLE.scheduler} sort={sort} onSort={handleSort} style={{ marginBottom: '8px' }} />
                   <select className="form-control" style={{ padding: '4px 8px', fontSize: '0.75rem', height: '28px' }} value={filters.scheduler} onChange={e => setFilters(f => ({ ...f, scheduler: e.target.value }))}>
                     <option value="all">All</option>
                     {schedulerOptions.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
                 </th>
-                <th style={{ minWidth: '80px', textAlign: 'center', verticalAlign: 'top' }}><div style={{ marginBottom: '8px' }}>Total</div></th>
-                <th style={{ minWidth: '80px', textAlign: 'center', verticalAlign: 'top' }}><div style={{ marginBottom: '8px' }}>Passed</div></th>
-                <th style={{ minWidth: '80px', textAlign: 'center', verticalAlign: 'top' }}><div style={{ marginBottom: '8px' }}>Failed</div></th>
-                <th style={{ minWidth: '150px', verticalAlign: 'top' }}><div style={{ marginBottom: '8px' }}>Last Run</div></th>
+                <th style={{ minWidth: '150px', verticalAlign: 'top' }}>
+                  <SortHeader col="pass_rate" label={SORTABLE.pass_rate} sort={sort} onSort={handleSort} style={{ marginBottom: '8px' }} />
+                </th>
+                <th style={{ minWidth: '150px', verticalAlign: 'top' }}>
+                  <SortHeader col="last_run" label={SORTABLE.last_run} sort={sort} onSort={handleSort} style={{ marginBottom: '8px' }} />
+                </th>
                 <th style={{ textAlign: 'right', verticalAlign: 'top' }}><div style={{ marginBottom: '8px' }}>Actions</div></th>
               </tr>
             </thead>
-            <tbody>
-              {filteredRuns.map(run => {
-                const isOpen = expanded.has(run.id);
-                return (
-                  <Fragment key={run.id}>
-                    <tr style={{ cursor: 'pointer' }} onClick={() => toggleExpand(run.id)}>
-                      <td style={{ paddingLeft: '12px', color: 'var(--text-secondary)' }}>
-                        {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                      </td>
-                      <td style={{ fontWeight: 600, color: 'var(--accent-color)', fontFamily: 'monospace' }}>{run.name || run.id}</td>
-                      <td>{run.module}</td>
-                      <td>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                          <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR[run.status] ?? COLORS.muted, display: 'inline-block', flexShrink: 0 }} />
-                          <span style={{ textTransform: 'capitalize', fontSize: '0.85rem' }}>{run.status}</span>
-                        </div>
-                      </td>
-                      <td>{run.scheduler}</td>
-                      <td style={{ textAlign: 'center', color: 'var(--text-secondary)' }}>{run.total_tests || '—'}</td>
-                      <td style={{ textAlign: 'center', color: COLORS.passed, fontWeight: 600 }}>{run.passed_tests || '—'}</td>
-                      <td style={{ textAlign: 'center', color: COLORS.failed, fontWeight: 600 }}>{run.failed_tests || '—'}</td>
-                      <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{formatDt(run.end_time)}</td>
-                      <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
-                        <button className="btn btn-danger" style={{ padding: '5px' }} title="Delete regression" onClick={() => handleDelete(run.id)}>
-                          <Trash2 size={14} />
-                        </button>
-                      </td>
-                    </tr>
-                    {isOpen && (
-                      <>
-                        <tr style={{ background: 'var(--bg-color-tertiary)' }}>
-                          <td colSpan="10" style={{ padding: '6px 48px', fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
-                            Execution History — {run.name || run.id}
-                          </td>
-                        </tr>
-                        <RunResultsRows regressionId={run.id} formatDt={formatDt} />
-                      </>
-                    )}
-                  </Fragment>
-                );
-              })}
-              {!loading && filteredRuns.length === 0 && (
+            {/* Offset is carried by spacer rows rather than absolute positioning,
+                which would detach cells from the table's column widths. */}
+            <tbody aria-hidden="true"><tr style={{ height: padTop }} /></tbody>
+
+            {virtualRows.map(vr => {
+              const run    = sortedRuns[vr.index];
+              const isOpen = expanded.has(run.id);
+              return (
+                <tbody
+                  key={run.id}
+                  data-index={vr.index}
+                  ref={rowVirtualizer.measureElement}
+                >
+                  <tr style={{ cursor: 'pointer' }} onClick={() => toggleExpand(run.id)}>
+                    <td style={{ paddingLeft: '12px', color: 'var(--text-secondary)' }}>
+                      {isOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+                    </td>
+                    <td style={{ fontWeight: 600, color: 'var(--accent-color)', fontFamily: 'monospace' }}>{run.name || run.id}</td>
+                    <td>{run.module}</td>
+                    <td>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ width: 8, height: 8, borderRadius: '50%', background: STATUS_COLOR[run.status] ?? COLORS.muted, display: 'inline-block', flexShrink: 0 }} />
+                        <span style={{ textTransform: 'capitalize', fontSize: '0.85rem' }}>{run.status}</span>
+                      </div>
+                    </td>
+                    <td>{run.scheduler}</td>
+                    <td><PassRateCell passed={run.passed_tests} total={run.total_tests} /></td>
+                    <td style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>{formatDt(lastRunOf(run))}</td>
+                    <td style={{ textAlign: 'right', whiteSpace: 'nowrap' }} onClick={e => e.stopPropagation()}>
+                      <button className="btn btn-danger" style={{ padding: '5px' }} title="Delete regression" onClick={() => handleDelete(run.id)}>
+                        <Trash2 size={14} />
+                      </button>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <>
+                      <tr style={{ background: 'var(--bg-color-tertiary)' }}>
+                        <td colSpan="8" style={{ padding: '6px 48px', fontSize: '0.72rem', fontWeight: 700, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>
+                          Execution History — {run.name || run.id}
+                        </td>
+                      </tr>
+                      <RunResultsRows regressionId={run.id} formatDt={formatDt} />
+                    </>
+                  )}
+                </tbody>
+              );
+            })}
+
+            <tbody aria-hidden="true"><tr style={{ height: padBottom }} /></tbody>
+
+            {!loading && sortedRuns.length === 0 && (
+              <tbody>
                 <tr>
-                  <td colSpan="10" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '40px 0' }}>
+                  <td colSpan="8" style={{ textAlign: 'center', color: 'var(--text-secondary)', padding: '40px 0' }}>
                     {runs.length === 0 ? 'No regressions yet — create one to get started.' : 'No regressions match your filters.'}
                   </td>
                 </tr>
-              )}
-            </tbody>
+              </tbody>
+            )}
           </table>
         </div>
       </div>
