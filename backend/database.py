@@ -79,6 +79,35 @@ def _migrate():
             except Exception:
                 pass   # already present
 
+        # Auth tables — companies and users. SQLModel.create_all makes these on a
+        # fresh DB; the explicit DDL upgrades installs that predate auth.
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS companies (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id TEXT NOT NULL UNIQUE,
+                name       TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                is_active  INTEGER NOT NULL DEFAULT 1
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS users (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                company_id    TEXT NOT NULL,
+                email         TEXT NOT NULL UNIQUE,
+                username      TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                role          TEXT NOT NULL DEFAULT 'user',
+                is_active     INTEGER NOT NULL DEFAULT 1,
+                created_at    TEXT NOT NULL,
+                last_login    TEXT
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_companies_company_id ON companies(company_id)"))
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_email          ON users(email)"))
+        conn.execute(text("CREATE        INDEX IF NOT EXISTS ix_users_company_id     ON users(company_id)"))
+        conn.commit()
+
         # Migrate old timestamped test_runs rows into run_results
         rows = conn.execute(text("SELECT * FROM test_runs")).mappings().fetchall()
         for row in rows:

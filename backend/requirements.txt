@@ -2,3 +2,5 @@ fastapi
 uvicorn[standard]
 sqlmodel
 requests
+python-jose[cryptography]
+passlib[bcrypt]

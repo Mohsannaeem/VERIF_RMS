@@ -118,3 +118,30 @@ class IntegrationSettings(SQLModel, table=True):
     slack_webhook: str = ""
     email_list: str = ""
     updated_at: str = Field(default_factory=_now_utc)
+
+
+class Company(SQLModel, table=True):
+    """An organisation. Its server-generated CMP-XXXXXXXX id is what users type
+    at login, so it cannot be spoofed the way a self-chosen name could."""
+    __tablename__ = "companies"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: str = Field(unique=True, index=True)   # e.g. "CMP-A3F7K2XB"
+    name: str
+    created_at: str = Field(default_factory=_now_utc)
+    is_active: bool = True
+
+
+class User(SQLModel, table=True):
+    """A person who can sign in. Only the bcrypt hash of the password is stored."""
+    __tablename__ = "users"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: str = Field(index=True)                # FK → companies.company_id
+    email: str = Field(unique=True, index=True)
+    username: str                                      # display name
+    password_hash: str                                 # bcrypt — never plain text
+    role: str = "user"                                 # "admin" | "user"
+    is_active: bool = True
+    created_at: str = Field(default_factory=_now_utc)
+    last_login: Optional[str] = None
