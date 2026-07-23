@@ -1,6 +1,7 @@
 import React from 'react';
 import { Mail, MessageSquare, Webhook, Key } from 'lucide-react';
 import ApiKeysCard from '../components/ApiKeysCard.jsx';
+import AdminPanel from '../components/AdminPanel.jsx';
 
 function Settings() {
   const saveSettings = (e) => {
@@ -77,6 +78,8 @@ function Settings() {
     </div>
 
     <ApiKeysCard />
+
+    <AdminPanel />
     </>
   );
 }

@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { KeyRound, Trash2, Copy, Check, ShieldAlert } from 'lucide-react';
 import { Modal, ModalFooter } from './ui/Modal.jsx';
 import { api } from '../api';
+import { useAuth } from '../context/AuthContext';
 
 /**
  * The backend stores UTC as "YYYY-MM-DDTHH:MM:SS" with no zone suffix, which JS
@@ -50,12 +51,21 @@ function Input({ label, required, ...props }) {
 }
 
 function ApiKeysCard() {
+  const { user, isAdmin } = useAuth();
+  // A signed-in non-admin owns every key they create; the backend enforces this,
+  // so we pre-fill and lock the owner fields rather than ask them to retype it.
+  const lockOwner = Boolean(user) && !isAdmin;
+
   const [keys, setKeys]         = useState([]);
   const [projects, setProjects] = useState([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState('');
 
-  const [form, setForm]       = useState(BLANK);
+  const [form, setForm]       = useState({
+    ...BLANK,
+    owner_name:  user?.username || '',
+    owner_email: user?.email || '',
+  });
   const [creating, setCreating] = useState(false);
 
   const [revealed, setRevealed] = useState(null);   // { name, key } | null
@@ -89,7 +99,8 @@ function ApiKeysCard() {
       setKeys(prev => [created, ...prev]);
       setRevealed({ name: created.name, key });
       setCopied(false);
-      setForm(BLANK);
+      // Keep the owner pinned to the signed-in user for the next key.
+      setForm({ ...BLANK, owner_name: user?.username || '', owner_email: user?.email || '' });
     } catch (e) {
       setError(cleanError(e.message));
     } finally {
@@ -136,9 +147,9 @@ function ApiKeysCard() {
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '12px' }}>
         <Input label="Key name" required placeholder="e.g. Nightly CI Pipeline"
                value={form.name} onChange={e => set('name', e.target.value)} />
-        <Input label="Owner" required placeholder="e.g. Mohsan Naeem"
+        <Input label="Owner" required placeholder="e.g. Mohsan Naeem" disabled={lockOwner}
                value={form.owner_name} onChange={e => set('owner_name', e.target.value)} />
-        <Input label="Email" required type="email" placeholder="owner@company.com"
+        <Input label="Email" required type="email" placeholder="owner@company.com" disabled={lockOwner}
                value={form.owner_email} onChange={e => set('owner_email', e.target.value)} />
       </div>
       <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginBottom: '12px' }}>

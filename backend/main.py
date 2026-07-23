@@ -14,7 +14,11 @@ from sqlmodel import SQLModel, Session, select
 from typing import List, Optional
 
 from database import create_db, get_session
-from models import Project, TestRun, RunResult, CoverageSnapshot, Schedule, IntegrationSettings, ApiKey, _now_utc
+from models import Project, TestRun, RunResult, CoverageSnapshot, Schedule, IntegrationSettings, ApiKey, Company, User, _now_utc
+from auth import (
+    hash_password, verify_password, create_access_token,
+    get_current_user_payload, get_optional_user_payload,
+)
 
 # ---------------------------------------------------------------------------
 # Config from environment (override via .env or shell exports)
@@ -696,8 +700,18 @@ class ApiKeyCreated(ApiKeyPublic):
 
 
 @app.post("/api/keys", response_model=ApiKeyCreated, status_code=201)
-def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session)):
-    """Mint a key. The raw value exists only in this response — only its hash is stored."""
+def create_api_key(
+    body: ApiKeyRequest,
+    session: Session = Depends(get_session),
+    caller: Optional[dict] = Depends(get_optional_user_payload),
+):
+    """Mint a key. The raw value exists only in this response — only its hash is stored.
+    A signed-in non-admin can only mint keys owned by themselves."""
+    # Non-admins cannot mint keys in someone else's name.
+    if caller and caller.get("role") != "admin":
+        body.owner_email = caller.get("sub", "")
+        body.owner_name  = body.owner_name.strip() or caller.get("username", "")
+
     if not body.name.strip():
         raise HTTPException(status_code=422, detail="Key name is required.")
     if not body.owner_name.strip():
@@ -731,20 +745,273 @@ def create_api_key(body: ApiKeyRequest, session: Session = Depends(get_session))
 
 
 @app.get("/api/keys", response_model=List[ApiKeyPublic])
-def list_api_keys(project_id: Optional[str] = None, session: Session = Depends(get_session)):
-    """List keys. Read-only, so unauthenticated — the response carries no secret."""
+def list_api_keys(
+    project_id: Optional[str] = None,
+    session: Session = Depends(get_session),
+    caller: Optional[dict] = Depends(get_optional_user_payload),
+):
+    """List keys. Read-only. A signed-in non-admin sees only their own keys;
+    admins and anonymous callers (open mode) see all."""
     query = select(ApiKey)
     if project_id:
         query = query.where(ApiKey.project_id == project_id)
+    if caller and caller.get("role") != "admin":
+        query = query.where(ApiKey.owner_email == caller.get("sub", ""))
     rows = session.exec(query.order_by(ApiKey.created_at.desc())).all()
     return [ApiKeyPublic(**r.model_dump(exclude={"key_hash"})) for r in rows]
 
 
 @app.delete("/api/keys/{key_id}")
-def delete_api_key(key_id: int, session: Session = Depends(get_session)):
+def delete_api_key(
+    key_id: int,
+    session: Session = Depends(get_session),
+    caller: Optional[dict] = Depends(get_optional_user_payload),
+):
     row = session.get(ApiKey, key_id)
     if not row:
         raise HTTPException(status_code=404, detail="API key not found")
+    # A signed-in non-admin can only revoke keys they own.
+    if caller and caller.get("role") != "admin" and row.owner_email != caller.get("sub"):
+        raise HTTPException(status_code=403, detail="You can only revoke your own API keys.")
     session.delete(row)
     session.commit()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Authentication — setup, login, profile
+# ---------------------------------------------------------------------------
+
+def _require_user(
+    payload: dict = Depends(get_current_user_payload),
+    session: Session = Depends(get_session),
+) -> User:
+    """Resolve a valid JWT to its User row, or 401 if the account is gone/disabled."""
+    user = session.exec(select(User).where(User.email == payload.get("sub"))).first()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=401, detail="Account not found or disabled.")
+    return user
+
+
+def _require_admin(user: User = Depends(_require_user)) -> User:
+    if user.role != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required.")
+    return user
+
+
+def _new_company_id() -> str:
+    """Server-generated CMP-XXXXXXXX. Admin-only creation keeps it unspoofable."""
+    return "CMP-" + secrets.token_hex(4).upper()
+
+
+def _token_for(user: User, remember: bool) -> str:
+    return create_access_token(
+        {"sub": user.email, "role": user.role, "company_id": user.company_id, "uid": user.id},
+        remember=remember,
+    )
+
+
+class UserPublic(SQLModel):
+    id: int
+    email: str
+    username: str
+    role: str
+    company_id: str
+    is_active: bool
+    created_at: str
+    last_login: Optional[str] = None
+
+
+class SetupRequest(SQLModel):
+    company_name: str
+    username: str
+    email: str
+    password: str
+
+
+class LoginRequest(SQLModel):
+    company_id: str
+    email: str
+    password: str
+    remember: bool = False
+
+
+@app.get("/api/auth/status")
+def auth_status(session: Session = Depends(get_session)):
+    """The frontend polls this to choose between the setup and sign-in screens."""
+    return {"setup_complete": session.exec(select(User)).first() is not None}
+
+
+@app.post("/api/auth/setup", status_code=201)
+def auth_setup(body: SetupRequest, session: Session = Depends(get_session)):
+    """First-run only: create the founding admin and their company. Blocked once
+    any user exists, so it cannot be used to escalate later."""
+    if session.exec(select(User)).first() is not None:
+        raise HTTPException(status_code=403, detail="Setup already complete.")
+    if not body.company_name.strip():
+        raise HTTPException(status_code=422, detail="Company name is required.")
+    if not body.username.strip():
+        raise HTTPException(status_code=422, detail="Your name is required.")
+    if not _EMAIL_RE.match(body.email.strip()):
+        raise HTTPException(status_code=422, detail="A valid email is required.")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
+
+    company_id = _new_company_id()
+    session.add(Company(company_id=company_id, name=body.company_name.strip()))
+    admin = User(
+        company_id=company_id,
+        email=body.email.strip().lower(),
+        username=body.username.strip(),
+        password_hash=hash_password(body.password),
+        role="admin",
+        last_login=_now_utc(),
+    )
+    session.add(admin)
+    session.commit()
+    session.refresh(admin)
+    return {
+        "access_token": _token_for(admin, remember=False),
+        "token_type": "bearer",
+        "user": UserPublic(**admin.model_dump()),
+        "company_id": company_id,
+    }
+
+
+@app.post("/api/auth/login")
+def auth_login(body: LoginRequest, session: Session = Depends(get_session)):
+    """Company ID + email + password → JWT. A single vague error avoids telling an
+    attacker which of the three was wrong."""
+    invalid = HTTPException(status_code=401, detail="Invalid company ID, email, or password.")
+    user = session.exec(select(User).where(User.email == body.email.strip().lower())).first()
+    if not user or not verify_password(body.password, user.password_hash):
+        raise invalid
+    if user.company_id != body.company_id.strip().upper():
+        raise invalid
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="This account has been disabled.")
+
+    user.last_login = _now_utc()
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return {
+        "access_token": _token_for(user, remember=body.remember),
+        "token_type": "bearer",
+        "user": UserPublic(**user.model_dump()),
+        "company_id": user.company_id,
+    }
+
+
+@app.get("/api/auth/me", response_model=UserPublic)
+def auth_me(user: User = Depends(_require_user)):
+    return UserPublic(**user.model_dump())
+
+
+# ---------------------------------------------------------------------------
+# Admin — companies and users
+# ---------------------------------------------------------------------------
+
+class CompanyPublic(SQLModel):
+    id: int
+    company_id: str
+    name: str
+    created_at: str
+    is_active: bool
+
+
+class CompanyRequest(SQLModel):
+    name: str
+
+
+class NewUserRequest(SQLModel):
+    company_id: str
+    email: str
+    username: str
+    password: str
+    role: str = "user"
+
+
+class UserUpdate(SQLModel):
+    is_active: Optional[bool] = None
+    role: Optional[str] = None
+
+
+@app.post("/api/admin/companies", response_model=CompanyPublic, status_code=201)
+def create_company(body: CompanyRequest, session: Session = Depends(get_session), _: User = Depends(_require_admin)):
+    if not body.name.strip():
+        raise HTTPException(status_code=422, detail="Company name is required.")
+    company = Company(company_id=_new_company_id(), name=body.name.strip())
+    session.add(company)
+    session.commit()
+    session.refresh(company)
+    return CompanyPublic(**company.model_dump())
+
+
+@app.get("/api/admin/companies", response_model=List[CompanyPublic])
+def list_companies(session: Session = Depends(get_session), _: User = Depends(_require_admin)):
+    rows = session.exec(select(Company).order_by(Company.created_at.desc())).all()
+    return [CompanyPublic(**c.model_dump()) for c in rows]
+
+
+@app.delete("/api/admin/companies/{company_id}")
+def deactivate_company(company_id: str, session: Session = Depends(get_session), _: User = Depends(_require_admin)):
+    company = session.exec(select(Company).where(Company.company_id == company_id)).first()
+    if not company:
+        raise HTTPException(status_code=404, detail="Company not found.")
+    company.is_active = False
+    session.add(company)
+    session.commit()
+    return {"ok": True}
+
+
+@app.post("/api/admin/users", response_model=UserPublic, status_code=201)
+def create_user(body: NewUserRequest, session: Session = Depends(get_session), _: User = Depends(_require_admin)):
+    if not _EMAIL_RE.match(body.email.strip()):
+        raise HTTPException(status_code=422, detail="A valid email is required.")
+    if len(body.password) < 8:
+        raise HTTPException(status_code=422, detail="Password must be at least 8 characters.")
+    if body.role not in ("admin", "user"):
+        raise HTTPException(status_code=422, detail="Role must be 'admin' or 'user'.")
+    if not session.exec(select(Company).where(Company.company_id == body.company_id.strip().upper())).first():
+        raise HTTPException(status_code=404, detail="No such company.")
+    if session.exec(select(User).where(User.email == body.email.strip().lower())).first():
+        raise HTTPException(status_code=409, detail="A user with that email already exists.")
+
+    user = User(
+        company_id=body.company_id.strip().upper(),
+        email=body.email.strip().lower(),
+        username=body.username.strip() or body.email.strip().lower(),
+        password_hash=hash_password(body.password),
+        role=body.role,
+    )
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return UserPublic(**user.model_dump())
+
+
+@app.get("/api/admin/users", response_model=List[UserPublic])
+def list_users(session: Session = Depends(get_session), _: User = Depends(_require_admin)):
+    rows = session.exec(select(User).order_by(User.created_at.desc())).all()
+    return [UserPublic(**u.model_dump()) for u in rows]
+
+
+@app.patch("/api/admin/users/{user_id}", response_model=UserPublic)
+def update_user(user_id: int, body: UserUpdate, session: Session = Depends(get_session), admin: User = Depends(_require_admin)):
+    user = session.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if body.role is not None:
+        if body.role not in ("admin", "user"):
+            raise HTTPException(status_code=422, detail="Role must be 'admin' or 'user'.")
+        user.role = body.role
+    if body.is_active is not None:
+        # Guard against an admin disabling or demoting themselves into lockout.
+        if user.id == admin.id and (body.is_active is False):
+            raise HTTPException(status_code=400, detail="You cannot disable your own account.")
+        user.is_active = body.is_active
+    session.add(user)
+    session.commit()
+    session.refresh(user)
+    return UserPublic(**user.model_dump())

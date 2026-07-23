@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { NavLink, Outlet, useLocation } from 'react-router-dom';
-import { LayoutDashboard, PlaySquare, CalendarClock, Settings as SettingsIcon, Bell, FolderOpen, PieChart, Loader, Plus, ChevronDown, Sun, Moon } from 'lucide-react';
+import { LayoutDashboard, PlaySquare, CalendarClock, Settings as SettingsIcon, Bell, FolderOpen, PieChart, Loader, Plus, ChevronDown, Sun, Moon, LogOut, User as UserIcon, Shield } from 'lucide-react';
 import clsx from 'clsx';
 
 import BASE, { api } from '../api';
 import { Modal, Field, ModalFooter } from './ui/Modal.jsx';
+import { useAuth } from '../context/AuthContext';
 
 // ── Page title lookup (replaces switch statement) ──────────────────────────
 const PAGE_TITLES = {
@@ -33,6 +34,10 @@ function Layout() {
   const [formError, setFormError] = useState('');
   const dropRef                   = useRef(null);
 
+  const { user, isAuthenticated, logout } = useAuth();
+  const [userMenu, setUserMenu]   = useState(false);
+  const userRef                   = useRef(null);
+
   // ── Theme toggle ─────────────────────────────────────────────────────────
   useEffect(() => {
     document.documentElement.setAttribute('data-theme', theme);
@@ -43,7 +48,10 @@ function Layout() {
 
   // ── Close dropdown on outside click ──────────────────────────────────────
   useEffect(() => {
-    const handler = e => { if (dropRef.current && !dropRef.current.contains(e.target)) setDropOpen(false); };
+    const handler = e => {
+      if (dropRef.current && !dropRef.current.contains(e.target)) setDropOpen(false);
+      if (userRef.current && !userRef.current.contains(e.target)) setUserMenu(false);
+    };
     document.addEventListener('mousedown', handler);
     return () => document.removeEventListener('mousedown', handler);
   }, []);
@@ -251,6 +259,49 @@ function Layout() {
             <button className="btn-icon" disabled title="Notifications coming soon">
               <Bell size={17} />
             </button>
+
+            {/* User menu */}
+            {isAuthenticated && user && (
+              <div ref={userRef} style={{ position: 'relative' }}>
+                <button
+                  className="btn-icon"
+                  onClick={() => setUserMenu(o => !o)}
+                  title={user.email}
+                  style={{ display: 'flex', alignItems: 'center', gap: '6px', width: 'auto', padding: '0 8px' }}
+                >
+                  <span style={{ width: 26, height: 26, borderRadius: '50%', background: 'var(--accent-color)', color: '#fff',
+                                 display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '0.75rem', fontWeight: 700 }}>
+                    {(user.username || user.email || '?').charAt(0).toUpperCase()}
+                  </span>
+                  <ChevronDown size={13} style={{ opacity: 0.7 }} />
+                </button>
+                {userMenu && (
+                  <div style={{ position: 'absolute', right: 0, top: 'calc(100% + 8px)', minWidth: '220px', zIndex: 50,
+                                background: 'var(--bg-color-secondary)', border: '1px solid var(--border-color)',
+                                borderRadius: '10px', boxShadow: 'var(--shadow-lg, 0 16px 32px rgba(0,0,0,0.4))', overflow: 'hidden' }}>
+                    <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border-color)' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontWeight: 600, color: 'var(--text-primary)', fontSize: '0.88rem' }}>
+                        {user.role === 'admin' ? <Shield size={13} style={{ color: 'var(--accent-color)' }} /> : <UserIcon size={13} />}
+                        {user.username || user.email}
+                      </div>
+                      <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '2px' }}>{user.email}</div>
+                      <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: '4px', fontFamily: 'monospace' }}>
+                        {user.company_id} · {user.role}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { setUserMenu(false); logout(); }}
+                      style={{ display: 'flex', alignItems: 'center', gap: '8px', width: '100%', padding: '11px 14px',
+                               background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-primary)', fontSize: '0.85rem' }}
+                      onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-color-tertiary)'}
+                      onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                    >
+                      <LogOut size={15} /> Sign out
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </header>
 
